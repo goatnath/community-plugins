@@ -22,6 +22,7 @@ end
 
 local branch = cfg("branch")
 local updateCheckInterval = cfg("check_interval")
+local systemStatsCheckInterval = cfg("system_stats_check_interval")
 local completedCommands = 0
 
 local localHashCmd  = "nixos-version --hash 2> /dev/null | cut -c -7"
@@ -30,7 +31,7 @@ local nixosGenerationsCmd = "nixos-rebuild list-generations | tail -n +2 | wc -l
 local nixosCurrentGenCmd = "nixos-rebuild list-generations | grep True | awk '{print $1}'"
 local hmGenerationsCmd = "home-manager generations | wc -l"
 local hmCurrentGenCmd = "home-manager generations | grep '(current)' | awk '{print $5}'"
-local nixStoreSizeCmd = `du -s --block-size=1GiB /nix/store | awk '\{print $1 " GiB"\}'`
+local storeSizeCmd = `du -s --block-size=1GiB /nix/store | awk '\{print $1 " GiB"\}'`
 local closureSizeCmd = "nix path-info --closure-size --human-readable /run/current-system | awk '{print $2, $3}'"
 
 setState("lastCheckTime", 0)
@@ -39,10 +40,22 @@ setState("localHash", "n/a")
 setState("remoteHash", "n/a")
 setState("isRunning", false)
 setState("isUpdateAvailable", false)
+setState("lastSystemStatsCheckTime", 0)
+setState("hasHomeManager", noctalia.commandExists("home-manager"))
+setState("nixosGenerations", "•••")
+setState("nixosCurrentGen", "•••")
+setState("hmGenerations", "•••")
+setState("hmCurrentGen", "•••")
+setState("storeSize", "•••")
+setState("closureSize", "•••")
 
 function update()
     if (os.time() - getState("lastCheckTime")) >= 60 * updateCheckInterval then
         checkUpdate()
+    end
+
+    if (os.time() - getState("lastSystemStatsCheckTime")) >= 60 * systemStatsCheckInterval then
+        checkSystemStats()
     end
 end
 
@@ -116,3 +129,33 @@ watchState("command", function(command)
         completedCommands = 0
     end
 end)
+
+function checkSystemStats()
+    setState("lastSystemStatsCheckTime", os.time())
+
+    noctalia.runAsync(nixosGenerationsCmd, function(result)
+        setState("nixosGenerations", result.stdout)
+    end)
+
+    noctalia.runAsync(nixosCurrentGenCmd, function(result)
+        setState("nixosCurrentGen", result.stdout)
+    end)
+
+    if getState("hasHomeManager") then
+        noctalia.runAsync(hmGenerationsCmd, function(result)
+            setState("hmGenerations", result.stdout)
+        end)
+
+        noctalia.runAsync(hmCurrentGenCmd, function(result)
+            setState("hmCurrentGen", result.stdout)
+        end)
+    end
+
+    noctalia.runStream(storeSizeCmd, function(line)
+        setState("storeSize", line)
+    end)
+
+    noctalia.runStream(closureSizeCmd, function(line)
+        setState("closureSize", line)
+    end)
+end

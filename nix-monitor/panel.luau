@@ -48,6 +48,27 @@ local function labelBox(subtext, text, glyph)
     })
 end
 
+function statLabel(text, glyph: string?)
+    local items = {}
+    if glyph ~= nil then
+        table.insert(items, ui.glyph({
+            name = glyph,
+            size = 20
+        }))
+    end
+
+    table.insert(items, ui.label({
+        text = text,
+        fontSize = 12,
+        fontWeight = "semibold"
+    }))
+
+    return ui.row({
+        gap = 8,
+        align = "center"
+    }, items)
+end
+
 local function render()
     local firstBtn = btnCheck
 
@@ -80,10 +101,24 @@ local function render()
     end
 
     local lastCheckTimeStr = getState("lastCheckTimeStr")
+    local generationItems = {
+        statLabel(`SYS: {getState("nixosGenerations")}`, "device-desktop"),
+        statLabel(`{tr("panel.current")}: {getState("nixosCurrentGen")}`, "device-desktop-check")
+    }
+
+    if getState("hasHomeManager") then
+        table.insert(generationItems,
+            statLabel(`HM: {getState("hmGenerations")}`, "home")
+        )
+
+        table.insert(generationItems,
+            statLabel(`{tr("panel.current")}: {getState("hmCurrentGen")}`, "home-check")
+        )
+    end
 
     panel.render(
         ui.column({
-            gap = 8
+            gap = 8,
         }, {
             ui.row({
                 justify = "space_between",
@@ -111,6 +146,33 @@ local function render()
             }, {
                 labelBox(tr("panel.local"), getState("localHash"), "devices-pc"),
                 labelBox(tr("panel.remote"), getState("remoteHash"), "world"),
+            }),
+            ui.separator({
+                thickness = 2,
+                orientation = "horizontal",
+                spacing = 4
+            }),
+            ui.row({
+                fill = "surface/0.7",
+                align = "center",
+                justify = "space_between",
+                flexGrow = 1,
+                paddingV = 4,
+                paddingH = 8,
+                radius = 8,
+            }, generationItems),
+            ui.row({
+                fill = "surface/0.7",
+                align = "center",
+                justify = "center",
+                flexGrow = 1,
+                paddingV = 4,
+                paddingH = 8,
+                radius = 8,
+            }, {
+                statLabel(`{tr("panel.store_size")}: {getState("storeSize")}`, "database"),
+                ui.spacer({width = 16}),
+                statLabel(`{tr("panel.closure_size")}: {getState("closureSize")}`, "server"),
             }),
             ui.separator({
                 thickness = 2,
