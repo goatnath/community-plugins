@@ -22,9 +22,16 @@ end
 
 local branch = cfg("branch")
 local updateCheckInterval = cfg("check_interval")
+local completedCommands = 0
+
 local localHashCmd  = "nixos-version --hash 2> /dev/null | cut -c -7"
 local remoteHashCmd = "git ls-remote https://github.com/NixOS/nixpkgs " .. branch .. " 2>/dev/null | cut -c 1-7"
-local completedCommands = 0
+local nixosGenerationsCmd = "nixos-rebuild list-generations | tail -n +2 | wc -l"
+local nixosCurrentGenCmd = "nixos-rebuild list-generations | grep True | awk '{print $1}'"
+local hmGenerationsCmd = "home-manager generations | wc -l"
+local hmCurrentGenCmd = "home-manager generations | grep '(current)' | awk '{print $5}'"
+local nixStoreSizeCmd = `du -s --block-size=1GiB /nix/store | awk '\{print $1 " GiB"\}'`
+local closureSizeCmd = "nix path-info --closure-size --human-readable /run/current-system | awk '{print $2, $3}'"
 
 setState("lastCheckTime", 0)
 setState("lastCheckTimeStr", "n/a")
