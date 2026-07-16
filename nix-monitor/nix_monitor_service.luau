@@ -23,7 +23,8 @@ end
 
 function killWithPidFile(file)
 	if noctalia.fileExists(file) then
-		local pid = noctalia.string.trim(noctalia.readFile(file))
+		local content = noctalia.readFile(file) or ""
+		local pid = noctalia.string.trim(content)
 
 		if type(pid) == "string" and pid ~= "" then
 			noctalia.runAsync(`pkill -9 -P {pid} && kill -9 {pid}`)
@@ -95,7 +96,7 @@ end
 -- Currently it is writing to a file because when I use the runAsync with
 -- the callback, it is timed out
 function checkRemoteHash(delay: number?)
-	local delay = delay or 0
+	local _delay = delay or 0
 
 	if getState("isRemoteCheckRunning") then
 		return
@@ -109,12 +110,13 @@ function checkRemoteHash(delay: number?)
 	end
 
 	noctalia.writeFile(remoteHashFile, "")
-	noctalia.runAsync(`sleep {delay} && {remoteHashCmd} > {remoteHashFile} & echo $! > {remotePidFile}`)
+	noctalia.runAsync(`sleep {_delay} && {remoteHashCmd} > {remoteHashFile} & echo $! > {remotePidFile}`)
 end
 
 -- Check if the remoteHash check command is finished by reading the file
 function checkRemoteStatus()
-	local remoteHash = noctalia.string.trim(noctalia.readFile(remoteHashFile))
+	local remoteHashFileContent = noctalia.readFile(remoteHashFile) or ""
+	local remoteHash = noctalia.string.trim(remoteHashFileContent)
 
 	if type(remoteHash) == "string" and remoteHash ~= "" then
 		setState("isRemoteCheckRunning", false)
@@ -179,8 +181,10 @@ function checkSystemStats()
 end
 
 function checkSystemStatsFile()
-	local storeSize = noctalia.string.trim(noctalia.readFile(storeSizeFile))
-	local closureSize = noctalia.string.trim(noctalia.readFile(closureSizeFile))
+	local storeSizeFileContent = noctalia.readFile(storeSizeFile) or ""
+	local storeSize = noctalia.string.trim(storeSizeFileContent)
+	local closureSizeFileContent = noctalia.readFile(closureSizeFile) or ""
+	local closureSize = noctalia.string.trim(closureSizeFileContent)
 
 	if typeof(storeSize) == "string" and storeSize ~= "" then
 		setState("storeSize", storeSize)
