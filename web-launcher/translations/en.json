@@ -1,0 +1,8 @@
+{
+  "settings": {
+    "links": {
+      "label": "Links",
+      "description": "Format: Name|https://url"
+    }
+  }
+}
