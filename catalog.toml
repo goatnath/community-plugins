@@ -155,7 +155,7 @@ tags = ["hardware"]
 [[plugin]]
 id = "rxtsel/portctl"
 name = "Portctl"
-version = "0.2.0"
+version = "0.2.1"
 author = "Cristhian Melo"
 license = "MIT"
 icon = "plug"
