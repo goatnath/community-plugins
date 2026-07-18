@@ -5,6 +5,9 @@ plugin_api = 3
 author = "yocraft"
 description = "Quickly open your favorite websites from the launcher."
 tags = ["launcher", "utility", "network", "productivity"]
+dependencies = [ "xdg-utils" ]
+licence = "MIT"
+icon = "world"
 
 [[launcher_provider]]
 id = "web-launcher"

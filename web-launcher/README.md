@@ -8,11 +8,11 @@ Quickly open your favorite websites from the launcher. Favicons are downloaded a
 | --- | --- |
 | ID | `yocraft/web-launcher` |
 | Entries | Launcher provider: `web-launcher` |
-| Launcher Prefix | `web` |
+| Launcher Prefix | `/web` |
 
 ## Requirements
 
-A browser.
+A browser and `xdg-utils`.
 
 ## Usage
 
@@ -25,7 +25,7 @@ You can customize the list and order of websites in settings.
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `links` | `string_list` | `see below` | Websites list and order. |
-| `notify` | `bool` | `false` | Toggle notification when launching website. |
+| `notify` | `bool` | `true` | Toggle notification when launching website. |
 | `icon_provider` | `select` | `google` | Icon download source. |
 
 Default links:
