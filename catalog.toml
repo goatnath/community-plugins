@@ -284,3 +284,14 @@ icon = "device-gamepad-2"
 description = "Set the DualShock 4 lightbar colour from a bar button and panel."
 plugin_api = 3
 tags = ["gaming", "hardware", "utility", "bar", "panel"]
+
+[[plugin]]
+id = "jinliu/imagemagick-clock"
+name = "ImageMagick Clock"
+version = "1.0.0"
+author = "Jin Liu"
+license = "MIT"
+icon = "clock"
+description = "A custom clock drawn with ImageMagick."
+plugin_api = 3
+tags = ["clock"]
