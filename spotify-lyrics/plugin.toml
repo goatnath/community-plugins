@@ -2,11 +2,10 @@ id = "noctalia/spotify-lyrics"
 name = "Spotify Lyrics"
 version = "1.2.0"
 plugin_api = 3
-min_noctalia = "5.0.0"
 author = "goatnath"
 license = "MIT"
 dependencies = []
-tags = ["music", "lyrics"]
+tags = ["music"]
 icon = "music"
 description = "Time-synced lyrics panel linked to the media widget."
 
