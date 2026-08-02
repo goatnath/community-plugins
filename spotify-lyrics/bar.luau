@@ -32,5 +32,5 @@ function update()
 end
 
 function onClick()
-  noctalia.togglePanel("noctalia/spotify-lyrics:lyrics-panel")
+  noctalia.togglePanel("goatnath/spotify-lyrics:lyrics-panel")
 end

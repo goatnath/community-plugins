@@ -8,12 +8,12 @@ A seamless, time-synced scrolling lyrics panel for the Noctalia desktop shell. I
 * **Native Shell Integration:** Doesn't feel like a clunky third-party app. It uses Noctalia's native declarative UI framework for buttery smooth, theme-aware rendering.
 
 ## Plugin
-- **Id:** `noctalia/spotify-lyrics`
+- **Id:** `goatnath/spotify-lyrics`
 - **Widgets:**
   - `lyrics`: The bar icon that toggles the lyrics panel.
 - **Panels:**
   - `lyrics-panel`: The scrolling lyrics panel.
-  - To toggle it manually via IPC, run: `noctalia msg panel-toggle noctalia/spotify-lyrics:lyrics-panel`
+  - To toggle it manually via IPC, run: `noctalia msg panel-toggle goatnath/spotify-lyrics:lyrics-panel`
 
 ## Usage
 
@@ -54,7 +54,7 @@ systemctl --user enable --now noctalia-lyrics.service
 1. Install this plugin from the plugin manager or download the folder to `~/.local/share/noctalia/plugins/spotify-lyrics/`.
 2. Enable the plugin via CLI:
 ```bash
-noctalia msg plugins enable noctalia/spotify-lyrics
+noctalia msg plugins enable goatnath/spotify-lyrics
 ```
 3. Add the `lyrics` widget to your bar's layout in your `~/.local/state/noctalia/settings.toml` (next to the `media` widget).
 
