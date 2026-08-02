@@ -28,11 +28,19 @@ noctalia msg panel-toggle nightwatch75/todo:panel
 | **+** (panel header)          | Add a new task and start typing it                  |
 | Sort toggle (panel header)    | Switch ordering between **Priority** and **Manual** |
 | Colour chip (row)             | Cycle the task's priority: important → medium → low |
-| ☰ grip (row, manual only)     | Pick the row up / drop the held row here (reorder)  |
+| ☰ grip (row, manual only)     | Drag the row to a new position (reorder)            |
 | Click the text, or ✎ (pencil) | Edit the task's text                                |
 | **Enter**, or ✓ (row)         | Commit the edit — the row goes back to a static line |
 | ☐ / ☑ button (row)            | Toggle done/to-do (done tasks are struck through)   |
 | 🗑 button (row)                | Delete the task                                     |
+| ⚙ button (panel header)       | Open this plugin's page in *Settings → Plugins*     |
+
+That settings page also opens from the command line, so it can be bound in your
+compositor too:
+
+```sh
+noctalia msg settings-open-plugin nightwatch75/todo
+```
 
 ## Priorities
 
@@ -64,12 +72,9 @@ ordering.
 
 ### Reordering in manual mode
 
-The noctalia plugin UI exposes no drag callbacks (only clicks), so the ☰ grip
-reorders with two clicks instead of a drag:
-
-1. Click a row's ☰ grip — it lights up; that row is now "held".
-2. Click another row's ☰ grip — the held row drops in just above it.
-3. Click the held row's own grip again to cancel.
+Grab a row by its ☰ grip and drag it. Thin insertion zones open up between the
+rows as you drag; drop the row on one to move it there. This uses noctalia's
+declarative drag-and-drop, which needs plugin API ≥ 5.
 
 ## Editing
 
@@ -81,6 +86,10 @@ close.
 
 Tick a task (☐ → ☑) to complete it — its text is struck through until you
 un-tick it. The bar glyph's tooltip shows how many tasks are still to do.
+
+A task longer than the row wraps onto further lines and the row grows to fit,
+so the whole text stays readable and never runs under the buttons on the
+right.
 
 ## Storage
 
@@ -114,7 +123,9 @@ noctalia msg plugins enable nightwatch75/todo
 
 ## Requirements
 
-- noctalia ≥ 5.0.0
+- noctalia v5.0.0-beta.6 or newer — the first tagged release that accepts
+  `plugin_api = 15` (`noctalia.openSettings()`, the panel's ⚙ button;
+  declarative drag-and-drop needs 5)
 - No external dependencies
 
 ## License

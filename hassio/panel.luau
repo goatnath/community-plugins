@@ -6,7 +6,6 @@ local haToken = noctalia.getConfig("ha_token")
 local entityStates = {}
 local status = "unconfigured"
 local expandedEntityId = nil
-local entitySlots = {}
 local sliderDraft = {}
 local sliderDirty = {}
 
@@ -17,8 +16,11 @@ local PENDING_TIMEOUT_SECONDS = 8
 
 local view = "list" -- "list" | "browser"
 local allEntities = {}
-local browserSlots = {}
 local browserLoading = false
+local browserLoadingSince = nil
+local browserFailed = false
+
+local BROWSER_TIMEOUT_SECONDS = 20
 local searchText = ""
 local monitoredEntities = {} -- current monitored list (owned here, saved to file)
 local panelOpenCount = 0
@@ -39,6 +41,8 @@ local function getStatusText()
         return noctalia.tr("widget.status_connecting")
     elseif status == "disconnected" then
         return noctalia.tr("widget.status_disconnected")
+    elseif status == "unreachable" then
+        return noctalia.tr("widget.status_unreachable")
     elseif status == "auth_failed" then
         return noctalia.tr("widget.status_auth_failed")
     else
@@ -51,11 +55,13 @@ local function getCleanToken()
     return haToken:gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-local function haPost(path, body)
+local function haPost(path, body, onFailure)
     local url = getCleanUrl()
-    if not url or url == "" then return end
     local cleanToken = getCleanToken()
-    if cleanToken == "" then return end
+    if not url or url == "" or cleanToken == "" then
+        if onFailure then onFailure() end
+        return
+    end
     local encodedBody = noctalia.json.encode(body)
 
     noctalia.http({
@@ -66,11 +72,16 @@ local function haPost(path, body)
             "Content-Type: application/json",
         },
         body = encodedBody,
-    }, function(response: HttpResponse)end)
+    }, function(response: HttpResponse)
+        local httpStatus = response and response.status or 0
+        if httpStatus >= 200 and httpStatus < 300 then return end
+        noctalia.log("Home Assistant rejected " .. path .. ": status " .. tostring(httpStatus))
+        if onFailure then onFailure() end
+    end)
 end
 
-local function callService(domain, service, entityId)
-    haPost("/api/services/" .. domain .. "/" .. service, { entity_id = entityId })
+local function callService(domain, service, entityId, onFailure)
+    haPost("/api/services/" .. domain .. "/" .. service, { entity_id = entityId }, onFailure)
 end
 
 local MANAGED_ENTITIES_FILE = "managed_entities.json"
@@ -135,19 +146,34 @@ local function toggleBrowserPin(entityId)
     render()
 end
 
-local function fetchAllEntities()
-    if browserLoading then return end
+-- /api/states is megabytes on a large instance and decoding it overruns the host's
+-- per-callback CPU budget. The tab and newline outside the {{ }} are the record
+-- separators; the ones inside replace() are escapes for Jinja to interpret.
+local ENTITY_LIST_TEMPLATE =
+    "{% for s in states %}{{ s.entity_id }}\t{{ s.name | replace('\\t',' ') | replace('\\n',' ') }}\n{% endfor %}"
+
+-- HA iterates `states` in entity_id order, so this is normally just the linear check.
+local function sortEntitiesIfNeeded(list)
+    for i = 2, #list do
+        if list[i].entity_id < list[i - 1].entity_id then
+            table.sort(list, function(a, b) return a.entity_id < b.entity_id end)
+            return
+        end
+    end
+end
+
+local function finishBrowserLoad(list, failed)
+    allEntities = list
+    browserLoading = false
+    browserLoadingSince = nil
+    browserFailed = failed == true
+    render()
+end
+
+-- Continues an already-started load, so it deliberately doesn't re-check browserLoading.
+local function fetchAllEntitiesFromStates()
     local cleanToken = getCleanToken()
     local url = getCleanUrl()
-    if not url or url == "" or cleanToken == "" then
-        allEntities = {}
-        browserLoading = false
-        render()
-        return
-    end
-
-    browserLoading = true
-    render()
 
     noctalia.http({
         url = url .. "/api/states",
@@ -155,23 +181,88 @@ local function fetchAllEntities()
             "Authorization: Bearer " .. cleanToken,
         }
     }, function(response: HttpResponse)
-        browserLoading = false
-        if response and response.body and response.body ~= "" then
-            local states = noctalia.json.decode(response.body)
-            if type(states) == "table" then
-                allEntities = {}
-                for _, s in ipairs(states) do
-                    local attrs = s.attributes or {}
-                    table.insert(allEntities, {
-                        entity_id    = s.entity_id,
-                        friendly_name = attrs.friendly_name or s.entity_id,
-                        domain       = s.entity_id:match("^([^.]+)"),
-                    })
-                end
-                table.sort(allEntities, function(a, b) return a.entity_id < b.entity_id end)
-            end
+        local httpStatus = response and response.status or 0
+        local body = response and response.body or ""
+        if httpStatus < 200 or httpStatus >= 300 or body == "" then
+            noctalia.log("Could not list entities: /api/states returned " .. tostring(httpStatus))
+            finishBrowserLoad({}, true)
+            return
         end
+
+        local states = noctalia.json.decode(body)
+        if type(states) ~= "table" then
+            noctalia.log("Could not list entities: /api/states was not decodable")
+            finishBrowserLoad({}, true)
+            return
+        end
+
+        local list = {}
+        for _, s in ipairs(states) do
+            local attrs = s.attributes or {}
+            table.insert(list, {
+                entity_id    = s.entity_id,
+                friendly_name = attrs.friendly_name or s.entity_id,
+                domain       = s.entity_id:match("^([^.]+)"),
+            })
+        end
+        sortEntitiesIfNeeded(list)
+        finishBrowserLoad(list)
+    end)
+end
+
+local function fetchAllEntities()
+    if browserLoading then return end
+    local cleanToken = getCleanToken()
+    local url = getCleanUrl()
+    if not url or url == "" or cleanToken == "" then
+        allEntities = {}
+        browserLoading = false
+        browserLoadingSince = nil
         render()
+        return
+    end
+
+    browserLoading = true
+    browserLoadingSince = os.clock()
+    browserFailed = false
+    render()
+
+    noctalia.http({
+        url = url .. "/api/template",
+        method = "POST",
+        headers = {
+            "Authorization: Bearer " .. cleanToken,
+            "Content-Type: application/json",
+        },
+        body = noctalia.json.encode({ template = ENTITY_LIST_TEMPLATE }),
+    }, function(response: HttpResponse)
+        local httpStatus = response and response.status or 0
+        local body = response and response.body or ""
+
+        if httpStatus < 200 or httpStatus >= 300 or body == "" then
+            noctalia.log("Entity list template unavailable (status " .. tostring(httpStatus)
+                .. "), falling back to /api/states")
+            fetchAllEntitiesFromStates()
+            return
+        end
+
+        local list = {}
+        for entityId, name in body:gmatch("([^\t\n]+)\t([^\n]*)") do
+            table.insert(list, {
+                entity_id     = entityId,
+                friendly_name = name ~= "" and name or entityId,
+                domain        = entityId:match("^([^.]+)"),
+            })
+        end
+
+        if #list == 0 then
+            noctalia.log("Entity list template returned nothing usable, falling back to /api/states")
+            fetchAllEntitiesFromStates()
+            return
+        end
+
+        sortEntitiesIfNeeded(list)
+        finishBrowserLoad(list)
     end)
 end
 
@@ -219,15 +310,7 @@ local function reconcilePending(now)
     return changed
 end
 
--- _actN/_expN are per-slot callback targets referenced by index from the rendered rows below.
--- In list view they act on the entity in that row's slot; in browser view _actN toggles its pin.
-local function actSlot(i)
-    if view == "browser" then
-        toggleBrowserPin(browserSlots[i])
-        return
-    end
-    local eid = entitySlots[i]
-    if not eid then return end
+local function actEntity(eid)
     local entity = entityStates[eid]
     if not entity then return end
     local d = entity.domain
@@ -237,14 +320,15 @@ local function actSlot(i)
         local newState = entity.state == "on" and "off" or "on"
         pendingToggle[eid] = newState
         pendingSince[eid] = os.clock()
-        callService(d, "toggle", eid)
+        callService(d, "toggle", eid, function()
+            clearPending(eid)
+            render()
+        end)
         render()
     end
 end
 
-local function expSlot(i)
-    local eid = entitySlots[i]
-    if not eid then return end
+local function expandEntity(eid)
     if expandedEntityId == eid then
         expandedEntityId = nil
     else
@@ -254,37 +338,6 @@ local function expSlot(i)
     end
     render()
 end
-
-function _act1()  actSlot(1)  end;  function _exp1()  expSlot(1)  end
-function _act2()  actSlot(2)  end;  function _exp2()  expSlot(2)  end
-function _act3()  actSlot(3)  end;  function _exp3()  expSlot(3)  end
-function _act4()  actSlot(4)  end;  function _exp4()  expSlot(4)  end
-function _act5()  actSlot(5)  end;  function _exp5()  expSlot(5)  end
-function _act6()  actSlot(6)  end;  function _exp6()  expSlot(6)  end
-function _act7()  actSlot(7)  end;  function _exp7()  expSlot(7)  end
-function _act8()  actSlot(8)  end;  function _exp8()  expSlot(8)  end
-function _act9()  actSlot(9)  end;  function _exp9()  expSlot(9)  end
-function _act10() actSlot(10) end;  function _exp10() expSlot(10) end
-function _act11() actSlot(11) end;  function _exp11() expSlot(11) end
-function _act12() actSlot(12) end;  function _exp12() expSlot(12) end
-function _act13() actSlot(13) end;  function _exp13() expSlot(13) end
-function _act14() actSlot(14) end;  function _exp14() expSlot(14) end
-function _act15() actSlot(15) end;  function _exp15() expSlot(15) end
-function _act16() actSlot(16) end;  function _exp16() expSlot(16) end
-function _act17() actSlot(17) end;  function _exp17() expSlot(17) end
-function _act18() actSlot(18) end;  function _exp18() expSlot(18) end
-function _act19() actSlot(19) end;  function _exp19() expSlot(19) end
-function _act20() actSlot(20) end;  function _exp20() expSlot(20) end
-function _act21() actSlot(21) end;  function _exp21() expSlot(21) end
-function _act22() actSlot(22) end;  function _exp22() expSlot(22) end
-function _act23() actSlot(23) end;  function _exp23() expSlot(23) end
-function _act24() actSlot(24) end;  function _exp24() expSlot(24) end
-function _act25() actSlot(25) end;  function _exp25() expSlot(25) end
-function _act26() actSlot(26) end;  function _exp26() expSlot(26) end
-function _act27() actSlot(27) end;  function _exp27() expSlot(27) end
-function _act28() actSlot(28) end;  function _exp28() expSlot(28) end
-function _act29() actSlot(29) end;  function _exp29() expSlot(29) end
-function _act30() actSlot(30) end;  function _exp30() expSlot(30) end
 
 function onBrightness(value)
     if not expandedEntityId then return end
@@ -350,6 +403,7 @@ function onBackToList()
     view = "list"
     allEntities = {}
     searchText = ""
+    browserFailed = false
     render()
 end
 
@@ -444,7 +498,7 @@ local function buildExpandedSection(entity)
     return ui.column({ gap = 8 }, rows)
 end
 
-local function buildEntityCard(entity, i)
+local function buildEntityCard(entity)
     local pending = pendingToggle[entity.entity_id]
     local isOn = (pending or entity.state) == "on"
     local domain = entity.domain
@@ -456,13 +510,13 @@ local function buildEntityCard(entity, i)
     if canExpand then
         expandBtn = ui.button({
             glyph = isExpanded and "chevron-up" or "chevron-down",
-            onClick = "_exp" .. i,
+            onClick = function() expandEntity(entity.entity_id) end,
         })
     end
 
     local isPending = pending ~= nil
     local iconClick = isPending and "onNoop"
-        or (isControllable(domain) or isAutomation(domain)) and "_act" .. i or "onNoop"
+        or (isControllable(domain) or isAutomation(domain)) and function() actEntity(entity.entity_id) end or "onNoop"
     local iconGlyph = isPending and "loader"
         or isAutomation(domain) and "player-play" or stateGlyph(domain, isOn)
 
@@ -485,22 +539,17 @@ local function buildEntityCard(entity, i)
     return ui.column({ gap = 8 }, cardChildren)
 end
 
--- Capped to 30: matches the number of _actN/_expN slot callbacks defined above.
-local MAX_SLOTS = 30
-
 local function getOrderedIds()
     local ids, seen = {}, {}
     for _, eid in ipairs(monitoredEntities) do
         if entityStates[eid] then
             table.insert(ids, eid)
             seen[eid] = true
-            if #ids >= MAX_SLOTS then return ids end
         end
     end
     for eid in pairs(entityStates) do
         if not seen[eid] then
             table.insert(ids, eid)
-            if #ids >= MAX_SLOTS then return ids end
         end
     end
     return ids
@@ -519,6 +568,9 @@ local function buildListBody(ids)
     if status == "disconnected" then
         return ui.label({ text = tr("disconnected_reconnecting"), color = "error" })
     end
+    if status == "unreachable" then
+        return ui.label({ text = tr("unreachable"), color = "error" })
+    end
     if #ids == 0 then
         return ui.label({
             text = status == "connected"
@@ -528,8 +580,8 @@ local function buildListBody(ids)
         })
     end
     local cards = {}
-    for i, eid in ipairs(ids) do
-        table.insert(cards, buildEntityCard(entityStates[eid], i))
+    for _, eid in ipairs(ids) do
+        table.insert(cards, buildEntityCard(entityStates[eid]))
     end
     return ui.scroll({ flexGrow = 1, gap = 8 }, cards)
 end
@@ -537,6 +589,9 @@ end
 local function buildBrowserBody()
     if browserLoading then
         return ui.label({ text = tr("loading_entities"), color = "on_surface_variant" })
+    end
+    if browserFailed then
+        return ui.label({ text = tr("load_entities_failed"), color = "error" })
     end
     if #allEntities == 0 then
         return ui.label({ text = tr("no_entities_found"), color = "on_surface_variant" })
@@ -550,7 +605,6 @@ local function buildBrowserBody()
             or e.friendly_name:lower():find(q, 1, true)
         then
             table.insert(filtered, e)
-            if #filtered >= 30 then break end
         end
     end
 
@@ -558,17 +612,16 @@ local function buildBrowserBody()
         return ui.label({ text = tr("no_entities_match"), color = "on_surface_variant" })
     end
 
-    browserSlots = {}
     local rows = {}
-    for i, e in ipairs(filtered) do
-        browserSlots[i] = e.entity_id
-        local pinned = isPinned(e.entity_id)
+    for _, e in ipairs(filtered) do
+        local entityId = e.entity_id
+        local pinned = isPinned(entityId)
         table.insert(rows, ui.row({ align = "center", gap = 8 }, {
             ui.column({ flexGrow = 1, gap = 2 }, {
                 ui.label({ text = e.friendly_name, fontWeight = "medium" }),
                 ui.label({ text = e.entity_id, color = "on_surface_variant", fontSize = 12 }),
             }),
-            ui.button({ glyph = pinned and "pin-filled" or "pin", onClick = "_act" .. i }),
+            ui.button({ glyph = pinned and "pin-filled" or "pin", onClick = function() toggleBrowserPin(entityId) end }),
         }))
     end
 
@@ -590,9 +643,6 @@ function render()
         }))
     else
         local ids = getOrderedIds()
-        entitySlots = {}
-        for i, eid in ipairs(ids) do entitySlots[i] = eid end
-
         panel.render(ui.column({ flexGrow = 1, gap = 16 }, {
             ui.row({ align = "center", gap = 8 }, {
                 ui.glyph({ name = "smart-home", size = 20, color = "primary" }),
@@ -621,7 +671,18 @@ function onClose()
 end
 
 function update()
-    if reconcilePending(os.clock()) then
+    local now = os.clock()
+
+    if browserLoading and browserLoadingSince and (now - browserLoadingSince) > BROWSER_TIMEOUT_SECONDS then
+        browserLoading = false
+        browserLoadingSince = nil
+        browserFailed = true
+        reconcilePending(now)
+        render()
+        return
+    end
+
+    if reconcilePending(now) then
         render()
     end
 end

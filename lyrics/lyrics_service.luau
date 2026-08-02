@@ -8,11 +8,16 @@ noctalia.setUpdateInterval(updateIntervalMs)
 
 local cache = {}
 local coverCache = {}
+local sourceCoverCache = {}
+local candidateCache = {}
+local selectedCandidateCache = {}
 local lastTrackKey = ""
 local inFlight = nil
 local fetchGeneration = 0
 local pollInFlight = false
 local coverInFlight = nil
+local coverFetchGeneration = 0
+local maxCoverFiles = 80
 local pluginDir = noctalia.pluginDir() or "/tmp"
 local cacheDir = pluginDir .. "/.cache"
 noctalia.mkdirAll(cacheDir)
@@ -33,10 +38,16 @@ local currentTrack = nil
 local currentEmbeddedLyrics = ""
 local currentPlayerInstance = ""
 local currentArtUrl = ""
+local currentCoverUrl = ""
+local pendingSourceCoverUrl = ""
+local mprisCoverFailed = false
+local maybeApplyCover
 
 for _, name in ipairs(noctalia.listDir(requestDir) or {}) do
   if name:match("^source_request_.*%.json$") then noctalia.removeFile(requestDir .. "/" .. name) end
 end
+
+local pruneCoverCache
 
 local function normalizePatterns(value)
   if type(value) ~= "table" then return {} end
@@ -53,8 +64,21 @@ local playerAllowlist = normalizePatterns(noctalia.getConfig("player_allowlist")
 local playerBlocklist = normalizePatterns(noctalia.getConfig("player_blocklist"))
 
 local function trackKey(track)
+  local durationSeconds = math.floor((tonumber(track.duration) or 0) / 1000000)
   return (track.playerInstance or "") .. "|" .. (track.trackId or "") .. "|"
-    .. track.title .. "|" .. track.artist .. "|" .. track.album
+    .. (track.title or "") .. "|" .. (track.artist or "") .. "|" .. (track.album or "")
+    .. "|" .. tostring(durationSeconds)
+end
+
+local function publishCandidates(tk, loading, selectionError, pendingCandidateId)
+  noctalia.state.set("lyrics_candidate_state", {
+    track_key = tk or "",
+    candidates = candidateCache[tk] or {},
+    selected_id = selectedCandidateCache[tk],
+    loading = loading == true,
+    error = selectionError,
+    pending_id = pendingCandidateId,
+  })
 end
 
 local function patternMatches(value, pattern)
@@ -91,10 +115,14 @@ end
 
 local function clearPlayerState()
   fetchGeneration = fetchGeneration + 1
+  coverFetchGeneration = coverFetchGeneration + 1
   currentPlayerInstance = ""
   currentTrack = nil
   currentEmbeddedLyrics = ""
   currentArtUrl = ""
+  currentCoverUrl = ""
+  pendingSourceCoverUrl = ""
+  mprisCoverFailed = false
   lastTrackKey = ""
   inFlight = nil
   coverInFlight = nil
@@ -102,6 +130,7 @@ local function clearPlayerState()
   noctalia.state.set("player_name", nil)
   noctalia.state.set("track", nil)
   noctalia.state.set("lyrics", nil)
+  publishCandidates("")
   noctalia.state.set("cover", nil)
   noctalia.state.set("playing", false)
 end
@@ -112,13 +141,97 @@ local function stableHash(value)
   return string.format("%08x", hash)
 end
 
-local function coverPathFor(track, artUrl)
-  return cacheDir .. "/cover_" .. stableHash(trackKey(track) .. "|" .. (artUrl or "")) .. ".jpg"
-end
-
 local function shellQuote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
 end
+
+local function coverStem(track, artUrl)
+  return "cover_" .. stableHash(trackKey(track) .. "|" .. (artUrl or ""))
+end
+
+local function coverExtensionFromUrl(artUrl)
+  local path = tostring(artUrl or ""):match("^[^?#]+") or ""
+  local ext = path:match("%.([A-Za-z0-9]+)$")
+  if not ext then return "" end
+  ext = ext:lower()
+  if ext == "jpeg" then return "jpg" end
+  if ext == "jpg" or ext == "png" or ext == "webp" or ext == "gif" or ext == "bmp" then return ext end
+  return ""
+end
+
+local function coverExtensionFromFile(path)
+  local contents = noctalia.readFile(path)
+  local header = contents and contents:sub(1, 16) or ""
+  if header:sub(1, 3) == "\255\216\255" then return "jpg" end
+  if header:sub(1, 8) == "\137PNG\r\n\26\n" then return "png" end
+  if header:sub(1, 4) == "RIFF" and header:sub(9, 12) == "WEBP" then return "webp" end
+  if header:sub(1, 6) == "GIF87a" or header:sub(1, 6) == "GIF89a" then return "gif" end
+  if header:sub(1, 2) == "BM" then return "bmp" end
+  return ""
+end
+
+local function findCachedCover(track, artUrl)
+  local stem = coverStem(track, artUrl)
+  local function correctedPath(path)
+    if not noctalia.fileExists(path) then return nil end
+    local actualExtension = coverExtensionFromFile(path)
+    local storedExtension = path:match("%.([^.]+)$")
+    if actualExtension == "" or actualExtension == storedExtension then return path end
+    local corrected = path:gsub("%.[^.]+$", "." .. actualExtension)
+    if noctalia.fileExists(corrected) then
+      noctalia.removeFile(path)
+      return corrected
+    end
+    local renamed = noctalia.renameFile(path, corrected)
+    return renamed and corrected or path
+  end
+  local preferred = coverExtensionFromUrl(artUrl)
+  if preferred ~= "" then
+    local path = cacheDir .. "/" .. stem .. "." .. preferred
+    local corrected = correctedPath(path)
+    if corrected then return corrected end
+  end
+  for _, ext in ipairs({ "jpg", "png", "webp", "gif", "bmp" }) do
+    local path = cacheDir .. "/" .. stem .. "." .. ext
+    local corrected = correctedPath(path)
+    if corrected then return corrected end
+  end
+  return nil
+end
+
+local function coverPathFor(track, artUrl, ext)
+  local extension = ext or coverExtensionFromUrl(artUrl)
+  if extension == "" then extension = "jpg" end
+  return cacheDir .. "/" .. coverStem(track, artUrl) .. "." .. extension
+end
+
+pruneCoverCache = function()
+  local names = noctalia.listDir(cacheDir) or {}
+  local files = {}
+  for _, name in ipairs(names) do
+    if name:match("^cover_.+%.%w+$") then
+      local path = cacheDir .. "/" .. name
+      local info = noctalia.fileInfo(path)
+      files[#files + 1] = { path = path, mtime = info and info.mtime or 0 }
+    end
+  end
+  if #files > maxCoverFiles then
+    table.sort(files, function(a, b) return a.mtime < b.mtime end)
+    for index = 1, #files - maxCoverFiles do
+      noctalia.removeFile(files[index].path)
+      files[index].removed = true
+    end
+  end
+  local keep = {}
+  for key, path in pairs(coverCache) do
+    if type(path) == "string" and noctalia.fileExists(path) then
+      keep[key] = path
+    end
+  end
+  coverCache = keep
+end
+
+pruneCoverCache()
 
 local function parseLRC(lrcText)
   local lines = {}
@@ -206,15 +319,23 @@ local function evictCache()
   for k, _ in pairs(cache) do keys[#keys + 1] = k end
   if #keys > 30 then
     table.sort(keys)
-    for i = 1, #keys - 30 do cache[keys[i]] = nil end
+    for i = 1, #keys - 30 do
+      cache[keys[i]] = nil
+      sourceCoverCache[keys[i]] = nil
+      candidateCache[keys[i]] = nil
+      selectedCandidateCache[keys[i]] = nil
+    end
   end
 end
 
-local function fetchLyricsNetEase(track, embeddedLyrics)
+local function fetchLyricsNetEase(track, embeddedLyrics, requestedCandidateId)
   local tk = trackKey(track)
+  requestedCandidateId = tostring(requestedCandidateId or "")
+  local manualSelection = requestedCandidateId ~= ""
   fetchGeneration = fetchGeneration + 1
   local flight = tk .. "|" .. tostring(fetchGeneration)
   inFlight = flight
+  publishCandidates(tk, manualSelection, nil, manualSelection and requestedCandidateId or nil)
 
   local function tryFetch(query, fallback)
     local searchUrl = "https://music.163.com/api/search/get?type=1&s=" .. noctalia.string.urlEncode(query) .. "&limit=5"
@@ -429,24 +550,27 @@ local function fetchLyricsNetEase(track, embeddedLyrics)
     end)
   end
 
-  if lyricsSource == "external" then
-    inFlight = nil
-    return
-  elseif lyricsSource == "mpris" then
-    if applyText(embeddedLyrics) then noctalia.state.set("lyrics_source_used", "mpris") end
-    inFlight = nil
-    return
-  elseif lyricsSource == "custom" then
-    fetchCustom(nil)
-    return
+  if not manualSelection then
+    if lyricsSource == "external" then
+      inFlight = nil
+      return
+    elseif lyricsSource == "mpris" then
+      if applyText(embeddedLyrics) then noctalia.state.set("lyrics_source_used", "mpris") end
+      inFlight = nil
+      return
+    elseif lyricsSource == "custom" then
+      fetchCustom(nil)
+      return
+    end
   end
 
   local requestPath = requestDir .. "/source_request_" .. tostring(fetchGeneration) .. ".json"
-  local sources = normalizedSources()
+  local sources = manualSelection and { "lrclib" } or normalizedSources()
   local request = {
     track = track,
     options = {
       translation_language = noctalia.getConfig("translation_language") or "zh-Hans",
+      lyrics_candidate_id = manualSelection and requestedCandidateId or nil,
     },
   }
 
@@ -455,8 +579,15 @@ local function fetchLyricsNetEase(track, embeddedLyrics)
     local source = sources[index]
     if not source then
       inFlight = nil
-      noctalia.state.set("lyrics", nil)
-      noctalia.state.set("lyrics_source_used", nil)
+      if manualSelection then
+        publishCandidates(tk, false, "selection_failed")
+      else
+        noctalia.state.set("lyrics", nil)
+        noctalia.state.set("lyrics_source_used", nil)
+        candidateCache[tk] = nil
+        selectedCandidateCache[tk] = nil
+        publishCandidates(tk)
+      end
       return
     end
     if source == "mpris" then
@@ -496,10 +627,22 @@ local function fetchLyricsNetEase(track, embeddedLyrics)
         local parsed = noctalia.json.decode(result.stdout or "")
         if type(parsed) == "table" and parsed.type == "lyrics" and type(parsed.lines) == "table" and #parsed.lines > 0 then
           cache[tk] = parsed.lines
+          if (parsed.source or source) == "lrclib" then
+            candidateCache[tk] = type(parsed.candidates) == "table" and parsed.candidates or {}
+            selectedCandidateCache[tk] = tostring(parsed.selected_candidate_id or "")
+          else
+            candidateCache[tk] = nil
+            selectedCandidateCache[tk] = nil
+          end
           evictCache()
           inFlight = nil
           noctalia.state.set("lyrics", parsed.lines)
           noctalia.state.set("lyrics_source_used", parsed.source or source)
+          publishCandidates(tk)
+          if type(parsed.cover) == "string" and parsed.cover ~= "" then
+            sourceCoverCache[tk] = parsed.cover
+            maybeApplyCover(track, parsed.cover)
+          end
         else
           trySource(index + 1)
         end
@@ -517,49 +660,94 @@ local function fetchLyricsNetEase(track, embeddedLyrics)
   trySource(1)
 end
 
+local function finalizeCoverFile(tempPath, track, artUrl)
+  if not tempPath or tempPath == "" or not noctalia.fileExists(tempPath) then return nil end
+  local ext = coverExtensionFromFile(tempPath)
+  if ext == "" then
+    noctalia.removeFile(tempPath)
+    return nil
+  end
+  local dest = coverPathFor(track, artUrl, ext)
+  if tempPath == dest then return dest end
+  noctalia.removeFile(dest)
+  local ok = noctalia.renameFile(tempPath, dest)
+  if ok or noctalia.fileExists(dest) then return dest end
+  if noctalia.fileExists(tempPath) then return tempPath end
+  return nil
+end
+
 local function fetchCover(track, artUrl)
   local tk = trackKey(track)
-  local ck = tk .. "|" .. (artUrl or "")
+  local url = tostring(artUrl or "")
+  if url == "" then return end
+  local ck = tk .. "|" .. url
   if coverInFlight == ck then return end
+  if coverCache[ck] and noctalia.fileExists(coverCache[ck]) then
+    if tk == lastTrackKey then
+      currentCoverUrl = url
+      noctalia.state.set("cover", coverCache[ck])
+    end
+    return
+  end
+  local cached = findCachedCover(track, url)
+  if cached then
+    coverCache[ck] = cached
+    if tk == lastTrackKey then
+      currentCoverUrl = url
+      noctalia.state.set("cover", cached)
+    end
+    return
+  end
+
+  coverFetchGeneration = coverFetchGeneration + 1
+  local generation = coverFetchGeneration
   coverInFlight = ck
 
-  local dest = coverPathFor(track, artUrl)
-
   local apply = function(path)
-    if coverInFlight ~= ck then return end
+    if coverInFlight ~= ck or generation ~= coverFetchGeneration then return end
     coverInFlight = nil
     if tk ~= lastTrackKey then return end
-    coverCache[ck] = path
-    noctalia.state.set("cover", path)
+    if path then
+      coverCache[ck] = path
+      currentCoverUrl = url
+      if url == currentArtUrl then
+        mprisCoverFailed = false
+        pendingSourceCoverUrl = ""
+      end
+      noctalia.state.set("cover", path)
+      pruneCoverCache()
+    elseif url == currentArtUrl then
+      mprisCoverFailed = true
+      local fallbackUrl = pendingSourceCoverUrl
+      pendingSourceCoverUrl = ""
+      if fallbackUrl ~= "" then fetchCover(track, fallbackUrl) end
+    end
   end
 
-  if noctalia.fileExists(dest) then
-    apply(dest)
-    return
-  end
-
-  if not artUrl or artUrl == "" then
-    noctalia.state.set("cover", nil)
-    coverInFlight = nil
-    return
-  end
-
-  if artUrl:sub(1, 7) == "file://" then
-    local source = noctalia.string.urlDecode(artUrl:sub(8))
+  if url:sub(1, 7) == "file://" then
+    local source = noctalia.string.urlDecode(url:sub(8))
     if not noctalia.fileExists(source) then
       apply(nil)
       return
     end
+    local ext = coverExtensionFromUrl(source)
+    if ext == "" then ext = coverExtensionFromFile(source) end
+    local dest = coverPathFor(track, url, ext ~= "" and ext or "img")
     noctalia.runAsync("cp -- " .. shellQuote(source) .. " " .. shellQuote(dest), function(result)
-      if result.exitCode == 0 then apply(dest) else apply(source) end
+      if generation ~= coverFetchGeneration then return end
+      if result.exitCode == 0 then
+        apply(finalizeCoverFile(dest, track, url) or dest)
+      else
+        apply(source)
+      end
     end)
     return
   end
 
-  local downloadUrl = artUrl
+  local downloadUrl = url
   local fallbackUrl = nil
-  if artUrl:find("music%.126%.net", 1) then
-    downloadUrl = artUrl:gsub("https?://p%d+%.music%.126%.net", "https://p1.music.126.net")
+  if url:find("music%.126%.net", 1) then
+    downloadUrl = url:gsub("https?://p%d+%.music%.126%.net", "https://p1.music.126.net")
     if downloadUrl:find("[?&]param=%d+y%d+") then
       downloadUrl = downloadUrl:gsub("param=%d+y%d+", "param=400y400")
     else
@@ -568,17 +756,30 @@ local function fetchCover(track, artUrl)
     fallbackUrl = downloadUrl:gsub("https://p1%.music%.126%.net", "https://p3.music.126.net")
   end
 
-  noctalia.download(downloadUrl, dest, function(ok)
+  local tempDest = coverPathFor(track, url, coverExtensionFromUrl(url) ~= "" and coverExtensionFromUrl(url) or "img")
+  noctalia.download(downloadUrl, tempDest, function(ok)
+    if generation ~= coverFetchGeneration then return end
     if ok then
-      apply(dest)
+      apply(finalizeCoverFile(tempDest, track, url))
     elseif fallbackUrl then
-      noctalia.download(fallbackUrl, dest, function(fallbackOk)
-        if fallbackOk then apply(dest) else apply(nil) end
+      noctalia.download(fallbackUrl, tempDest, function(fallbackOk)
+        if generation ~= coverFetchGeneration then return end
+        if fallbackOk then apply(finalizeCoverFile(tempDest, track, url)) else apply(nil) end
       end)
     else
       apply(nil)
     end
   end)
+end
+
+maybeApplyCover = function(track, artUrl)
+  if not track or not artUrl or artUrl == "" then return end
+  if currentCoverUrl ~= "" and currentCoverUrl == artUrl then return end
+  if currentArtUrl ~= "" and not mprisCoverFailed then
+    pendingSourceCoverUrl = artUrl
+    return
+  end
+  fetchCover(track, artUrl)
 end
 
 local function poll()
@@ -631,8 +832,15 @@ local function poll()
     noctalia.state.set("player_name", selected.name)
 
     if selected.title == "" and selected.artist == "" then
+      fetchGeneration = fetchGeneration + 1
+      inFlight = nil
+      currentTrack = nil
+      currentEmbeddedLyrics = ""
+      lastTrackKey = ""
       noctalia.state.set("track", nil)
       noctalia.state.set("lyrics", nil)
+      noctalia.state.set("lyrics_source_used", nil)
+      publishCandidates("")
       noctalia.state.set("playing", selected.status == "playing")
       return
     end
@@ -659,6 +867,11 @@ local function poll()
 
     if tk ~= lastTrackKey then
       lastTrackKey = tk
+      currentCoverUrl = ""
+      pendingSourceCoverUrl = ""
+      mprisCoverFailed = false
+      coverFetchGeneration = coverFetchGeneration + 1
+      coverInFlight = nil
       noctalia.state.set("track", t)
       noctalia.state.set("playing", playing)
 
@@ -666,27 +879,31 @@ local function poll()
       if displayMode == "track" then
         noctalia.state.set("lyrics", nil)
         noctalia.state.set("lyrics_source_used", nil)
+        candidateCache[tk] = nil
+        selectedCandidateCache[tk] = nil
+        publishCandidates(tk)
       elseif cached then
         noctalia.state.set("lyrics", cached)
         noctalia.state.set("lyrics_source_used", "cache")
+        publishCandidates(tk)
       else
         noctalia.state.set("lyrics", nil)
+        publishCandidates(tk)
         fetchLyricsNetEase(t, selected.embeddedLyrics)
       end
 
-      local coverKey = tk .. "|" .. selected.artUrl
-      local cachedCover = coverCache[coverKey]
-      if cachedCover then
-        noctalia.state.set("cover", cachedCover)
-      else
-        noctalia.state.set("cover", nil)
+      noctalia.state.set("cover", nil)
+      if selected.artUrl ~= "" then
+        pendingSourceCoverUrl = sourceCoverCache[tk] or ""
         fetchCover(t, selected.artUrl)
+      elseif sourceCoverCache[tk] then
+        maybeApplyCover(t, sourceCoverCache[tk])
       end
     else
       noctalia.state.set("track", t)
       noctalia.state.set("playing", playing)
-      if selected.artUrl ~= previousArtUrl then
-        noctalia.state.set("cover", nil)
+      if selected.artUrl ~= previousArtUrl and selected.artUrl ~= "" then
+        mprisCoverFailed = false
         fetchCover(t, selected.artUrl)
       end
     end
@@ -754,25 +971,49 @@ function onConfigChanged()
     fetchGeneration = fetchGeneration + 1
     inFlight = nil
     cache = {}
+    sourceCoverCache = {}
+    candidateCache = {}
+    selectedCandidateCache = {}
     noctalia.state.set("lyrics", nil)
+    publishCandidates(trackKey(currentTrack))
     if displayMode ~= "track" then fetchLyricsNetEase(currentTrack, currentEmbeddedLyrics) end
   end
 end
+
+local lastCandidateRequest = ""
+noctalia.state.watch("lyrics_candidate_request", function(request)
+  if type(request) ~= "table" or not currentTrack then return end
+  local requestId = tostring(request.request_id or "")
+  if requestId == "" or requestId == lastCandidateRequest then return end
+  lastCandidateRequest = requestId
+  local candidateId = tostring(request.candidate_id or "")
+  if candidateId == "" then return end
+  local tk = trackKey(currentTrack)
+  if tostring(request.track_key or "") ~= tk then return end
+  local known = false
+  for _, candidate in ipairs(candidateCache[tk] or {}) do
+    if tostring(candidate.id or "") == candidateId then
+      known = true
+      break
+    end
+  end
+  if not known or candidateId == tostring(selectedCandidateCache[tk] or "") then return end
+  inFlight = nil
+  fetchLyricsNetEase(currentTrack, currentEmbeddedLyrics, candidateId)
+end)
 
 local function applyPushedLyrics(payload)
   local decoded = noctalia.json.decode(payload or "")
   if type(decoded) == "table" then
     if decoded.track then
       currentTrack = decoded.track
-      lastTrackKey = trackKey({
-        playerInstance = decoded.track.playerInstance or "",
-        trackId = decoded.track.trackId or "",
-        title = decoded.track.title or "",
-        artist = decoded.track.artist or "",
-        album = decoded.track.album or "",
-      })
+      lastTrackKey = trackKey(decoded.track)
       noctalia.state.set("track", decoded.track)
     end
+    local tk = currentTrack and trackKey(currentTrack) or ""
+    candidateCache[tk] = nil
+    selectedCandidateCache[tk] = nil
+    publishCandidates(tk)
     if decoded.lines then noctalia.state.set("lyrics", decoded.lines) end
     if decoded.lyrics then
       local parsed = parseLRC(decoded.lyrics) or parsePlain(decoded.lyrics)
@@ -780,7 +1021,14 @@ local function applyPushedLyrics(payload)
     end
     if decoded.position ~= nil then noctalia.state.set("position", decoded.position + lyricsOffsetMs * 1000) end
     if decoded.playing ~= nil then noctalia.state.set("playing", decoded.playing == true) end
-    if decoded.cover ~= nil then noctalia.state.set("cover", decoded.cover) end
+    if type(decoded.cover) == "string" and decoded.cover ~= "" then
+      if decoded.cover:sub(1, 1) == "/" or decoded.cover:sub(1, 7) == "file://" then
+        currentCoverUrl = decoded.cover
+        noctalia.state.set("cover", decoded.cover:gsub("^file://", ""))
+      else
+        maybeApplyCover(currentTrack, decoded.cover)
+      end
+    end
     return true
   end
   return false
@@ -788,10 +1036,18 @@ end
 
 function onIpc(event, payload)
   if event == "push-lrc" then
+    local tk = currentTrack and trackKey(currentTrack) or ""
+    candidateCache[tk] = nil
+    selectedCandidateCache[tk] = nil
+    publishCandidates(tk)
     noctalia.state.set("lyrics", parseLRC(payload or "") or parsePlain(payload or ""))
   elseif event == "push-json" or event == "push-state" then
     applyPushedLyrics(payload)
   elseif event == "clear" then
+    local tk = currentTrack and trackKey(currentTrack) or ""
+    candidateCache[tk] = nil
+    selectedCandidateCache[tk] = nil
+    publishCandidates(tk)
     noctalia.state.set("lyrics", nil)
   end
 end

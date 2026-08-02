@@ -1,4 +1,4 @@
-# Noctalia Lyrics 1.4.1
+# Noctalia Lyrics 1.4.4
 
 Synchronized lyrics for the Noctalia bar, with multiple MPRIS players,
 translation and romanization layers, configurable sources, karaoke highlighting,
@@ -9,7 +9,7 @@ album artwork, and layout controls.
 | Field | Value |
 | --- | --- |
 | ID | `h465855hgg/lyrics` |
-| Entries | Bar widget: `lyrics`; service: `service` |
+| Entries | Bar widget: `lyrics`; panel: `selector`; shortcut: `open_selector`; service: `service` |
 
 ## Requirements
 
@@ -26,6 +26,14 @@ Install these commands on `PATH`:
 Enable `h465855hgg/lyrics`, start its `service` entry, and add the `lyrics` bar
 widget. Left-click switches between lyrics and track information when
 `display_mode` is `toggle`; right-click pauses or resumes the selected player.
+When LRCLIB returns multiple matches, hover over the lyrics widget briefly to
+open the `selector` panel and apply another result.
+Bind the `open_selector` shortcut to a key combination in Noctalia's shortcuts
+settings, or open the selector directly through IPC:
+
+```sh
+noctalia msg panel-toggle h465855hgg/lyrics:selector
+```
 
 ## Screenshots
 
@@ -83,7 +91,8 @@ romanization, and character-timing fields:
 `auto` tries the IDs listed in `lyrics_sources` from top to bottom. Supported
 IDs are:
 
-- `lrclib`: public LRCLIB search.
+- `lrclib`: public LRCLIB search with automatic synchronized-result ranking and
+  manual result selection.
 - `netease`: public NetEase search, synchronized lyrics, translations, and
   romanization when returned.
 - `splayer`: SPlayer's complete current lyric data, including line and word
@@ -105,6 +114,10 @@ IDs are:
 
 Source APIs can change or reject requests by region or account. Failure of one
 source in automatic mode moves to the next source without logging credentials.
+Album artwork uses MPRIS first, then the matched lyric source when available.
+LRCLIB, Qishui, and Musixmatch matches use the public iTunes Search API as an
+artwork fallback. Cached covers retain their detected image format and the
+oldest files are removed after the cache reaches 80 covers.
 
 ## Credential warning
 
@@ -163,6 +176,8 @@ polling, marquee metrics, player filters, and fine padding.
     none.
 14. Layout: test `padding_left`, `padding_right`, and `line_gap` on horizontal and
     vertical bars.
+15. LRCLIB selection: play a track with multiple results, briefly hover over the widget,
+    and switch between synchronized and plain entries without changing tracks.
 
 ## External protocol
 

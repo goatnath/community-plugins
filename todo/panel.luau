@@ -15,11 +15,9 @@
 --   * "priority" — rows display sorted important → medium → low; equal-priority
 --     rows keep their manual relative order. No drag handles are shown.
 --   * "manual" — the stored order is shown verbatim. A ☰ grip on each row
---     reorders it (see below); changing a priority only recolours the chip and
---     never moves the row. Because the noctalia plugin UI exposes no pointer
---     drag callbacks (only onClick), the grip works as a two-click grab/drop:
---     click a row's grip to pick it up (it highlights), click another row's
---     grip to drop the held row just above it, or click the held grip to cancel.
+--     drags it to a new position (declarative drag-and-drop, plugin_api >= 5):
+--     grab the grip and drop onto one of the thin insertion zones between rows.
+--     Changing a priority only recolours the chip and never moves the row.
 --
 -- Interaction: a row is a static line by default. Click its text or the pencil
 -- button to edit; press Enter or the ✓ button to commit back to the static
@@ -32,11 +30,44 @@
 -- The bar widget (todo.luau) lights its glyph while the panel is open via the
 -- shared "todo_open" state; it reads todo.json itself for the pending count.
 
+-- Row width budget. A Button constrains its label only when it has an explicit
+-- width (the host derives the label's max width from it); flexGrow alone lets a
+-- long task overrun the buttons to its right instead of shrinking. So the text
+-- button is given whatever the fixed parts of the row leave over.
+--
+-- The constrained label WRAPS, it does not ellipsize: Button sets the label's
+-- maxWidth and TextEllipsize::End but never a maxLines, and the text renderer
+-- only ellipsizes against an explicit line budget — with maxLines 0 Pango is
+-- given the full 500-line backstop and wraps freely. Wrapping is what we want
+-- here (the whole task stays readable), and the row grows to fit because
+-- Button pins only a minimum height.
+-- Every constant below mirrors one in noctalia's Style, named so the sum can be
+-- re-checked against the host rather than re-measured by eye.
+local PANEL_WIDTH = 400 -- keep in sync with [[panel]] width in plugin.toml
+local PANEL_PADDING = 14 -- Style::panelPadding, applied left and right
+local SCROLLBAR_GUTTER = 14 -- Style::scrollbarWidth (6) + Style::scrollbarGap (8)
+local ROW_GAP = 8 -- the task row's own gap
+local CHIP_W = 16 -- the priority chip
+local GRIP_W = 24 -- the ☰ drag grip, manual mode only
+local GLYPH_BTN_W = 30 -- ghost glyph button: 2 × Style::spaceSm + a 14px glyph
+local ROW_CONTENT_W = PANEL_WIDTH - (2 * PANEL_PADDING) - SCROLLBAR_GUTTER
+
+-- Width left for the task text once the chip, the optional grip and the
+-- `trailing` glyph buttons (each preceded by a gap) have taken their share.
+local function taskTextWidth(withGrip, trailing)
+    local width = ROW_CONTENT_W - CHIP_W - ROW_GAP - (trailing * (GLYPH_BTN_W + ROW_GAP))
+    if withGrip then
+        width -= GRIP_W + ROW_GAP
+    end
+    return width
+end
+
 local PRIORITIES = { "important", "medium", "low" }
 local RANK = { important = 1, medium = 2, low = 3 }
 local COLORS = { important = "#e06c75", medium = "#e5c07b", low = "#98c379" }
 local FILE_NAME = "todo.json"
 local AUTOSAVE_IDLE_TICKS = 2 -- 1s panel ticks with no edits before a flush
+local DRAG_TYPE = "todo-row" -- drag identifier matched by the row drop zones
 
 local items = {} -- array, ALWAYS in manual order (priority mode sorts a copy for display)
 local nextId = 1 -- monotonic id source (identity only, not a sort key)
@@ -46,22 +77,10 @@ local dirty = false -- unsaved inline text edits
 local idleTicks = 0
 local editingId = nil -- id of the row currently in edit mode (at most one)
 local loaded = false -- guard so an early save() can never truncate the file
-local sortMode = "priority" -- "priority" (auto sort) or "manual" (grip reorder)
-local grabbedId = nil -- id of the row "picked up" by its grip, awaiting a drop
+local sortMode = "priority" -- "priority" (auto sort) or "manual" (drag reorder)
 local confirmingClear = false -- header trash pressed, awaiting confirm/cancel
 
 local render
-
--- Per-row callbacks need distinct global names; the reconciler dispatches
--- callbacks by name only. getfenv() is the script environment lua_getglobal
--- reads from, so assigning into it defines the callback the host will find.
--- Keyed by the stable id, so a callback stays valid as rows reorder.
-local env = getfenv()
-local function rowCallback(prefix, id, fn)
-    local name = prefix .. "_" .. id
-    env[name] = fn
-    return name
-end
 
 local function tr(key, args)
     return noctalia.tr(key, args)
@@ -83,9 +102,12 @@ end
 
 -- Overlay every character with U+0336 (combining long stroke) so a plain label
 -- renders struck through — labels/buttons have no line-through prop.
+-- utf8.codes THROWS on invalid UTF-8, and render() would re-raise it on every
+-- frame until the host disables the plugin; utf8.len returns nil instead, so
+-- gate on it and fall back to the plain text (the ☑ still marks it done).
 local function strike(text)
-    if text == "" then
-        return ""
+    if text == "" or utf8.len(text) == nil then
+        return text
     end
     local out = {}
     for _, code in utf8.codes(text) do
@@ -223,9 +245,6 @@ local function deleteItem(id)
     if editingId == id then
         editingId = nil
     end
-    if grabbedId == id then
-        grabbedId = nil
-    end
     save()
     render()
 end
@@ -279,45 +298,38 @@ end
 
 -- Switch ordering mode. Only the `sort` choice is persisted — the task array
 -- is never rewritten, so the manual order survives any number of round trips
--- through priority mode. Any half-finished grab is dropped.
+-- through priority mode.
 local function setSortMode(mode)
     if mode ~= "manual" and mode ~= "priority" then
         return
     end
     sortMode = mode
-    grabbedId = nil
     save()
     render()
 end
 
--- Move the grabbed row to sit just above `targetId` (manual reorder via grips).
--- A drop onto the held row itself, or onto a vanished target, simply cancels.
-local function dropGrabbedOn(targetId)
-    if grabbedId == nil or grabbedId == targetId then
-        grabbedId = nil
-        render()
-        return
-    end
-    local grabbed = nil
+-- Move task `id` to sit at manual position `insertAt` (1-based, in `items`).
+-- The insertion zones number the gaps 1..#items+1, so `insertAt` is where the
+-- row lands before removing itself; drop onto its own gap is a no-op. Only
+-- reachable in manual mode, where the render order IS the `items` order.
+local function moveItemTo(id, insertAt)
+    local fromIndex = nil
     for i, item in ipairs(items) do
-        if item.id == grabbedId then
-            grabbed = table.remove(items, i)
+        if item.id == id then
+            fromIndex = i
             break
         end
     end
-    grabbedId = nil
-    if grabbed == nil then
-        render()
+    if fromIndex == nil or type(insertAt) ~= "number" then
         return
     end
-    local targetIndex = #items + 1
-    for i, item in ipairs(items) do
-        if item.id == targetId then
-            targetIndex = i
-            break
-        end
+    local moved = table.remove(items, fromIndex)
+    -- Removing the row shifts every later gap down by one.
+    if fromIndex < insertAt then
+        insertAt -= 1
     end
-    table.insert(items, targetIndex, grabbed)
+    insertAt = math.max(1, math.min(insertAt, #items + 1))
+    table.insert(items, insertAt, moved)
     save()
     render()
 end
@@ -332,8 +344,8 @@ local function doneCount()
     return n
 end
 
--- Remove every done row (the header trash, after confirmation). Editing or
--- grab state pointing at a removed row is dropped with it.
+-- Remove every done row (the header trash, after confirmation). Editing state
+-- pointing at a removed row is dropped with it.
 local function clearDone()
     local kept = {}
     for _, item in ipairs(items) do
@@ -346,9 +358,6 @@ local function clearDone()
         if editingId ~= nil and findItem(editingId) == nil then
             editingId = nil
         end
-        if grabbedId ~= nil and findItem(grabbedId) == nil then
-            grabbedId = nil
-        end
         save()
     end
     confirmingClear = false
@@ -358,26 +367,27 @@ end
 local function taskRow(item)
     local id = item.id
     local editing = editingId == id
-    local grabbed = grabbedId == id
 
-    -- Manual mode only: a ☰ grip that "picks up" the row, or drops the held one
-    -- here. Same glyph noctalia's own bar reorder uses ("menu-2"); it lights up
-    -- (primary) while this row is the one being held.
+    -- Manual mode only: a ☰ grip that drags the whole row to a new position.
+    -- The grip is a drag source holding the glyph, but previewAncestor = 1
+    -- makes the drag ghost the whole row and liftFromLayout pulls the row out
+    -- of the list while it moves; the thin insertion zones between rows are the
+    -- drop targets. Same glyph noctalia's own bar reorder uses ("menu-2").
     local grip = nil
     if sortMode == "manual" then
-        grip = ui.button({
-            key = "grip-" .. id .. (grabbed and "-on" or ""),
-            glyph = "menu-2",
-            variant = grabbed and "primary" or "ghost",
-            tooltip = tr(grabbed and "tip_grip_drop" or "tip_grip"),
-            onClick = rowCallback("todoGrip", id, function()
-                if grabbedId == nil then
-                    grabbedId = id
-                    render()
-                else
-                    dropGrabbedOn(id)
-                end
-            end),
+        grip = ui.dragSource({
+            key = "grip-" .. id,
+            dragType = DRAG_TYPE,
+            payload = tostring(id),
+            previewAncestor = 1,
+            liftFromLayout = true,
+            width = 24,
+            height = 24,
+            align = "center",
+            justify = "center",
+            tooltip = tr("tip_grip"),
+        }, {
+            ui.glyph({ name = "menu-2", size = 14, color = "on_surface_variant" }),
         })
     end
 
@@ -388,9 +398,9 @@ local function taskRow(item)
         height = 16,
         radius = 4,
         fill = COLORS[item.priority],
-        onClick = rowCallback("todoPrio", id, function()
+        onClick = function()
             cyclePriority(id)
-        end),
+        end,
     })
     local children = {}
     if grip ~= nil then
@@ -405,53 +415,55 @@ local function taskRow(item)
             placeholder = tr("placeholder"),
             focus = true,
             flexGrow = 1,
-            onChange = rowCallback("todoText", id, function(value)
+            onChange = function(value)
                 item.text = value
                 dirty = true
                 idleTicks = 0
-            end),
-            onSubmit = rowCallback("todoSubmit", id, function(value)
+            end,
+            onSubmit = function(value)
                 commitEdit(id, value)
-            end),
+            end,
         }))
         -- ✓ commits the edit, mirroring Enter.
         table.insert(children, ui.button({
             glyph = "check",
             variant = "primary",
             tooltip = tr("tip_commit"),
-            onClick = rowCallback("todoOk", id, function()
+            onClick = function()
                 commitEdit(id, item.text)
-            end),
+            end,
         }))
     else
         -- Static text; clicking it re-opens the editor ("press on the text").
+        -- The explicit width is what makes a long task wrap onto another line
+        -- instead of running under the three buttons that follow it.
         table.insert(children, ui.button({
             key = "view-" .. id,
             text = item.done and strike(item.text) or item.text,
             variant = "ghost",
             contentAlign = "start",
-            flexGrow = 1,
-            onClick = rowCallback("todoEdit", id, function()
+            width = taskTextWidth(grip ~= nil, 3),
+            onClick = function()
                 enterEdit(id)
-            end),
+            end,
         }))
         -- Done toggle: strikes the text through.
         table.insert(children, ui.button({
             glyph = item.done and "square-check" or "square",
             variant = "ghost",
             tooltip = tr(item.done and "tip_undone" or "tip_done"),
-            onClick = rowCallback("todoDone", id, function()
+            onClick = function()
                 toggleDone(id)
-            end),
+            end,
         }))
         -- Explicit edit affordance next to the row.
         table.insert(children, ui.button({
             glyph = "pencil",
             variant = "ghost",
             tooltip = tr("tip_edit"),
-            onClick = rowCallback("todoPencil", id, function()
+            onClick = function()
                 enterEdit(id)
-            end),
+            end,
         }))
     end
 
@@ -459,19 +471,18 @@ local function taskRow(item)
         glyph = "trash",
         variant = "ghost",
         tooltip = tr("tip_delete"),
-        onClick = rowCallback("todoDel", id, function()
+        onClick = function()
             deleteItem(id)
-        end),
+        end,
     }))
 
     return ui.row({
-        -- edit/done/mode/grab state flips the row's controls; key it to recreate cleanly
+        -- edit/done/mode state flips the row's controls; key it to recreate cleanly
         key = "row-"
             .. id
             .. (editing and "-edit" or "-view")
             .. (item.done and "-done" or "")
-            .. (sortMode == "manual" and "-m" or "")
-            .. (grabbed and "-grab" or ""),
+            .. (sortMode == "manual" and "-m" or ""),
         gap = 8,
         align = "center",
     }, children)
@@ -482,6 +493,22 @@ local function legendEntry(priority)
     return ui.row({ gap = 6, align = "center" }, {
         ui.box({ width = 12, height = 12, radius = 3, fill = COLORS[priority] }),
         ui.label({ text = tr("prio_" .. priority), fontSize = 11, color = "on_surface_variant" }),
+    })
+end
+
+-- A thin drop target in the gap before manual-order row `index` (and one past
+-- the end, at #items+1). expandOnDrag opens a row-height gap where the dragged
+-- row will land; hitSlop makes the 3px line reachable from the rows around it.
+local function insertionZone(index)
+    return ui.dropZone({
+        key = "gap-" .. index,
+        accepts = { DRAG_TYPE },
+        value = tostring(index),
+        onDrop = "onTodoDrop",
+        height = 3,
+        radius = 6,
+        expandOnDrag = true,
+        hitSlop = 28,
     })
 end
 
@@ -517,6 +544,7 @@ render = function()
             onClick = "onClearDone",
         }),
         ui.button({ key = "header-add", glyph = "plus", variant = "primary", tooltip = tr("tip_add"), onClick = "onAdd" }),
+        ui.button({ key = "header-settings", glyph = "settings", variant = "ghost", tooltip = tr("tip_settings"), onClick = "onOpenSettings" }),
         ui.button({ key = "header-close", glyph = "close", variant = "ghost", tooltip = tr("tip_close"), onClick = "onClosePanel" }),
     })
 
@@ -548,8 +576,18 @@ render = function()
         })
     else
         local rows = {}
-        for _, item in ipairs(displayItems()) do
+        -- Manual mode interleaves an insertion zone before each row (and one
+        -- after the last) so a drag can land in any gap. In manual mode the
+        -- render order IS the items order, so gap N targets items index N.
+        local manual = sortMode == "manual"
+        for index, item in ipairs(displayItems()) do
+            if manual then
+                table.insert(rows, insertionZone(index))
+            end
             table.insert(rows, taskRow(item))
+        end
+        if manual then
+            table.insert(rows, insertionZone(#items + 1))
         end
         body = ui.scroll({ flexGrow = 1, gap = 6 }, rows)
     end
@@ -572,7 +610,6 @@ function onOpen(_context)
     end
     load()
     editingId = nil
-    grabbedId = nil
     confirmingClear = false
     dirty = false
     idleTicks = 0
@@ -583,12 +620,19 @@ end
 
 function onClose()
     editingId = nil
-    grabbedId = nil
     confirmingClear = false
     if dirty then
         save()
     end
     noctalia.state.set("todo_open", false)
+end
+
+-- Fires on every teardown (shutdown and reload), even paths that skip onClose;
+-- flush a pending inline edit so it is never lost.
+function onExit()
+    if dirty then
+        save()
+    end
 end
 
 function onConfigChanged()
@@ -599,7 +643,6 @@ function onConfigChanged()
     filePath = folder .. "/" .. FILE_NAME
     noctalia.mkdirAll(folder)
     editingId = nil
-    grabbedId = nil
     confirmingClear = false
     load()
     render()
@@ -622,6 +665,12 @@ function onSortToggle()
     setSortMode(sortMode == "manual" and "priority" or "manual")
 end
 
+-- Drop callback for the insertion zones (declarative drag-and-drop). payload is
+-- the dragged row's id as text, value the target gap index as text.
+function onTodoDrop(payload, value)
+    moveItemTo(tonumber(payload), tonumber(value))
+end
+
 function onClearDone()
     confirmingClear = true
     render()
@@ -634,6 +683,13 @@ end
 function onClearDoneCancel()
     confirmingClear = false
     render()
+end
+
+-- Opens the settings window on this plugin's own page (the host supplies the
+-- plugin id, so a plugin can only ever open its own). It closes the panel on
+-- the way, so onClose flushes any pending edit first.
+function onOpenSettings()
+    noctalia.openSettings()
 end
 
 function onClosePanel()
