@@ -15,17 +15,18 @@ A seamless, time-synced scrolling lyrics panel for the Noctalia desktop shell. I
   - `lyrics-panel`: The scrolling lyrics panel.
   - To toggle it manually via IPC, run: `noctalia msg panel-toggle goatnath/spotify-lyrics:lyrics-panel`
 
-## Usage
+## Requirements
 
-### 1. Install Dependencies
-You need `playerctl` and the `syncedlyrics` python package.
+This plugin requires `playerctl`, `python3`, and `syncedlyrics`.
 ```bash
 # Arch Linux
-sudo pacman -S playerctl
+sudo pacman -S playerctl python
 pip install syncedlyrics
 ```
 
-### 2. Set up the Background Daemon
+## Usage
+
+### 1. Set up the Background Daemon
 The daemon listens to your media player (Spotify, MPD, etc.) and fetches the lyrics.
 
 1. Copy the `spotify_lyrics_daemon.py` file to your preferred location (e.g., `~/.local/bin/`).
