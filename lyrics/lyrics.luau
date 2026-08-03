@@ -82,6 +82,7 @@ local outgoingLine = nil
 local transitionElapsed = 0
 local marqueeElapsed = 0
 local smoothProgress = 0
+local currentPanelUnits = maxChars
 
 local FADE_OUT_MS = 130
 local FADE_IN_MS = 260
@@ -242,7 +243,7 @@ local function getFallbackLabel()
 end
 
 local function shouldMarquee(text)
-  return scrollMode ~= "static" and textUnits(text) > maxChars
+  return false
 end
 
 local function getMarqueeOffset(chars)
@@ -323,6 +324,46 @@ local function secondaryRowEnabled(text)
     and type(text) == "string" and text:match("%S") ~= nil
 end
 
+local function getLineUnits(line)
+  if type(line) ~= "table" and type(line) ~= "string" then return 0 end
+  local text = type(line) == "table" and line.text or line
+  local sec = secondaryText(line)
+  local u1 = textUnits(text)
+  local u2 = secondaryRowEnabled(sec) and textUnits(sec) or 0
+  return math.max(u1, u2)
+end
+
+local function calculateTargetUnits(position)
+  local target = maxChars
+  if displayMode == "track" or showMode == "track" then
+    local label = getTrackLabel()
+    return math.max(target, textUnits(label))
+  end
+  local info = getLineInfo()
+  if not info then
+    local label = getFallbackLabel()
+    return math.max(target, textUnits(label))
+  end
+
+  target = math.max(target, getLineUnits(info.line))
+
+  if transitionElapsed < FADE_OUT_MS and outgoingLine then
+    target = math.max(target, getLineUnits(outgoingLine))
+  end
+
+  if lyrics then
+    for i = info.index + 1, #lyrics do
+      local upcomingLine = lyrics[i]
+      local timeToNext = upcomingLine.time - (position or 0)
+      if timeToNext > 2000 then break end
+      if timeToNext > 0 then
+        target = math.max(target, getLineUnits(upcomingLine))
+      end
+    end
+  end
+  return target
+end
+
 local function compactMetrics(hasSecondary, vertical)
   if not hasSecondary or vertical or not doubleLineAutoFit then return 1, lineGap end
   local primaryBase = primaryFontSize > 0 and primaryFontSize or 13
@@ -344,15 +385,13 @@ local function buildLineRow(line, opts)
   local offset = math.floor(exactOffset)
   local fraction = exactOffset - offset
   local first = offset + 1
-  local last = #chars
-  if opts.marquee then
-    local units = 0
-    last = first - 1
-    for sourceIndex = first, #chars do
-      units = units + charUnits(chars[sourceIndex])
-      last = sourceIndex
-      if units > maxChars then break end
-    end
+  local units = 0
+  local last = first - 1
+  for sourceIndex = first, #chars do
+    local charU = charUnits(chars[sourceIndex])
+    if units + charU > currentPanelUnits + 0.01 then break end
+    units = units + charU
+    last = sourceIndex
   end
   local labels = {}
 
@@ -415,7 +454,7 @@ local function buildLineRow(line, opts)
   end
 
   if opts.marquee then
-    while #labels < math.ceil(maxChars) + 1 do
+    while #labels < math.ceil(currentPanelUnits) + 1 do
       labels[#labels + 1] = ui.label({ text = " ", opacity = 0, maxLines = 1 })
     end
   end
@@ -424,7 +463,7 @@ local function buildLineRow(line, opts)
     key = opts.key or "line",
     gap = 0,
     align = "center",
-    minWidth = maxChars * charWidth,
+    minWidth = currentPanelUnits * charWidth,
     opacity = opts.opacity or 1,
   }, labels)
 end
@@ -648,6 +687,9 @@ function update()
     smoothProgress = smoothProgress + (target - smoothProgress) * math.min(1, delta * 8)
   end
   displayedLine = info and info.line or nil
+
+  local targetUnits = calculateTargetUnits(position)
+  currentPanelUnits = currentPanelUnits + (targetUnits - currentPanelUnits) * math.min(1, delta * 6)
 
   if playing then
     transitionElapsed = transitionElapsed + delta * 1000
