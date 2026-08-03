@@ -1,9 +1,10 @@
 --!nonstrict
 -- Lyrics panel: 3-line synced view (prev / current / next).
--- Anchored to the bar widget so it feels like part of the media controls.
 
 local BASE_WIDTH = 460
+local BASE_HEIGHT = 160
 local currentPanelWidth = 460
+local currentPanelHeight = 160
 local lastClock = os.clock()
 
 local function charUnits(char)
@@ -38,27 +39,15 @@ local function getLineWidth(text, fontSize)
   for _, char in ipairs(toChars(text)) do
     units = units + charUnits(char)
   end
-  local charWidth = fontSize * 0.6
+  -- slightly conservative char width to anticipate wrapping
+  local charWidth = fontSize * 0.65 
   return units * charWidth
 end
 
-local function truncateText(text, fontSize, maxWidth)
-  local chars = toChars(text or "")
-  local units = 0
-  local charW = fontSize * 0.6
-  local maxU = maxWidth / charW
-  
-  local last = 0
-  for i, char in ipairs(chars) do
-    local u = charUnits(char)
-    if units + u > maxU + 0.01 then break end
-    units = units + u
-    last = i
-  end
-  
-  local res = ""
-  for i = 1, last do res = res .. chars[i] end
-  return res
+local function getLinesCount(text, fontSize, maxWidth)
+  if not text or text == "" then return 0 end
+  local w = getLineWidth(text, fontSize)
+  return math.max(1, math.ceil(w / maxWidth))
 end
 
 local function readState()
@@ -69,102 +58,94 @@ local function readState()
 end
 
 local function render(state)
-  -- No music
   if not state or state.status == "Stopped" or state.status == "" then
-    panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth }, {
+    panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
       ui.row({ justify = "center" }, { ui.glyph({ name = "music", size = 28, color = "on_surface/0.2" }) }),
       ui.label({ text = "No music playing", fontSize = 14, fontWeight = "medium", color = "on_surface/0.25", textAlign = "center" }),
     }))
     return
   end
 
-  -- Paused
   if state.status == "Paused" then
-    panel.render(ui.column({ flexGrow = 1, gap = 6, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth }, {
+    panel.render(ui.column({ flexGrow = 1, gap = 6, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
       ui.row({ gap = 6, justify = "center", align = "center" }, {
         ui.glyph({ name = "player-pause", size = 16, color = "on_surface/0.3" }),
         ui.label({
-          text = truncateText((state.title or "Paused") .. " — " .. (state.artist or ""), 12, currentPanelWidth - 32),
+          text = (state.title or "Paused") .. " — " .. (state.artist or ""),
           fontSize = 12,
           fontWeight = "medium",
           color = "on_surface/0.4",
           textAlign = "center",
-          maxLines = 1,
+          wrap = true,
         }),
       }),
       ui.label({
-        text = truncateText(state.current or "Paused", 18, currentPanelWidth - 32),
+        text = state.current or "Paused",
         fontSize = 18,
         fontWeight = "bold",
         color = "on_surface/0.6",
         textAlign = "center",
-        maxLines = 1,
+        wrap = true,
       }),
     }))
     return
   end
 
-  -- ── Playing ──
-
   local rows = {}
 
-  -- Track header
   if state.title and state.artist then
     table.insert(rows, ui.column({ gap = 4, align = "stretch" }, {
       ui.row({ justify = "center" }, { ui.glyph({ name = "music", size = 14, color = "primary/0.7" }) }),
       ui.label({
-        text = truncateText(state.title .. " • " .. state.artist, 12, currentPanelWidth - 32),
+        text = state.title .. " • " .. state.artist,
         fontSize = 12,
         fontWeight = "medium",
         color = "primary/0.7",
         textAlign = "center",
-        maxLines = 1,
+        wrap = true,
       }),
     }))
     table.insert(rows, ui.box({ height = 1, fill = "on_surface/0.06" }))
   end
 
-  -- Previous line (faded)
   local prevText = state.prev or ""
   if prevText ~= "" then
     table.insert(rows, ui.label({
-      text = truncateText(prevText, 14, currentPanelWidth - 32),
+      text = prevText,
       fontSize = 14,
       fontWeight = "medium",
       color = "on_surface/0.4",
-      wrap = false,
+      wrap = true,
       textAlign = "center",
     }))
   else
     table.insert(rows, ui.box({ height = 16 }))
   end
 
-  -- Current line (bold, prominent)
   table.insert(rows, ui.label({
-    text = truncateText(state.current or "...", 18, currentPanelWidth - 32),
+    text = state.current or "...",
     fontSize = 18,
     fontWeight = "bold",
     color = "on_surface/0.95",
-    wrap = false,
+    wrap = true,
     textAlign = "center",
   }))
 
-  -- Next line (faded)
   local nextText = state.next or ""
   if nextText ~= "" then
     table.insert(rows, ui.label({
-      text = truncateText(nextText, 14, currentPanelWidth - 32),
+      text = nextText,
       fontSize = 14,
       fontWeight = "medium",
       color = "on_surface/0.4",
-      wrap = false,
+      wrap = true,
       textAlign = "center",
     }))
   else
     table.insert(rows, ui.box({ height = 16 }))
   end
 
-  panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth }, rows))
+  panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, rows))
 end
 
 function update()
@@ -176,6 +157,7 @@ function update()
   
   local state = readState()
   local targetWidth = BASE_WIDTH
+  local targetHeight = BASE_HEIGHT
   
   if state and state.status == "Playing" then
     local titleText = (state.title or "") .. " • " .. (state.artist or "")
@@ -184,10 +166,22 @@ function update()
     targetWidth = math.max(targetWidth, getLineWidth(state.current or "...", 18))
     targetWidth = math.max(targetWidth, getLineWidth(state.next or "", 18))
     targetWidth = math.max(targetWidth, getLineWidth(state.next_next or "", 18))
-    targetWidth = targetWidth + 48 -- Add padding with extra safe buffer
+    targetWidth = targetWidth + 48 
+
+    -- Limit target width to a reasonable maximum so it wraps on small screens
+    targetWidth = math.min(targetWidth, 800)
+    
+    local innerW = targetWidth - 32
+    targetHeight = 32 + 24 -- padding + gaps
+    if state.title then targetHeight = targetHeight + 18 + 1 end
+    
+    targetHeight = targetHeight + (state.prev ~= "" and getLinesCount(state.prev, 14, innerW) * 20 or 16)
+    targetHeight = targetHeight + getLinesCount(state.current or "...", 18, innerW) * 26
+    targetHeight = targetHeight + (state.next ~= "" and getLinesCount(state.next, 14, innerW) * 20 or 16)
   end
   
   currentPanelWidth = currentPanelWidth + (targetWidth - currentPanelWidth) * math.min(1, delta * 6)
+  currentPanelHeight = currentPanelHeight + (targetHeight - currentPanelHeight) * math.min(1, delta * 6)
   
   render(state)
 end

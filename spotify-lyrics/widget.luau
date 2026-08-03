@@ -1,10 +1,10 @@
 --!nonstrict
 -- Spotify Lyrics desktop widget.
--- Reads current lyrics state written by the Python daemon.
--- Displays 3 lines: previous → current (highlighted) → next.
 
 local BASE_WIDTH = 400
+local BASE_HEIGHT = 160
 local currentPanelWidth = 400
+local currentPanelHeight = 160
 local lastClock = os.clock()
 
 local function charUnits(char)
@@ -39,27 +39,14 @@ local function getLineWidth(text, fontSize)
   for _, char in ipairs(toChars(text)) do
     units = units + charUnits(char)
   end
-  local charWidth = fontSize * 0.6
+  local charWidth = fontSize * 0.65 
   return units * charWidth
 end
 
-local function truncateText(text, fontSize, maxWidth)
-  local chars = toChars(text or "")
-  local units = 0
-  local charW = fontSize * 0.6
-  local maxU = maxWidth / charW
-  
-  local last = 0
-  for i, char in ipairs(chars) do
-    local u = charUnits(char)
-    if units + u > maxU + 0.01 then break end
-    units = units + u
-    last = i
-  end
-  
-  local res = ""
-  for i = 1, last do res = res .. chars[i] end
-  return res
+local function getLinesCount(text, fontSize, maxWidth)
+  if not text or text == "" then return 0 end
+  local w = getLineWidth(text, fontSize)
+  return math.max(1, math.ceil(w / maxWidth))
 end
 
 local function readState()
@@ -70,9 +57,8 @@ local function readState()
 end
 
 local function render(lyricsState)
-  -- When idle or paused, show a minimal status indicator
   if not lyricsState or lyricsState.status == "Stopped" or lyricsState.status == "" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth }, {
+    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
       ui.glyph({ name = "music", size = 28, color = "on_surface/0.3" }),
       ui.label({
         text = "No music playing",
@@ -85,79 +71,75 @@ local function render(lyricsState)
   end
 
   if lyricsState.status == "Paused" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth }, {
+    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
       ui.glyph({ name = "player-pause", size = 22, color = "on_surface/0.4" }),
       ui.label({
-        text = truncateText(lyricsState.current or "Paused", 22, currentPanelWidth),
+        text = lyricsState.current or "Paused",
         fontSize = 22,
         fontWeight = "bold",
         color = "on_surface/0.5",
-        maxLines = 1,
+        wrap = true,
       }),
     }))
     return
   end
 
-  -- ── Playing: render 3-line synced lyrics ──
-
   local rows = {}
 
-  -- Track info: small, subtle line at the top
   if lyricsState.title and lyricsState.artist then
     table.insert(rows, ui.row({ gap = 6, align = "center" }, {
       ui.glyph({ name = "music", size = 12, color = "primary/0.7" }),
       ui.label({
-        text = truncateText(lyricsState.title .. " — " .. lyricsState.artist, 11, currentPanelWidth - 18),
+        text = lyricsState.title .. " — " .. lyricsState.artist,
         fontSize = 11,
         fontWeight = "medium",
         color = "primary/0.6",
-        maxLines = 1,
+        wrap = true,
       }),
     }))
   end
 
-  -- Thin separator
   table.insert(rows, ui.box({ height = 1, fill = "on_surface/0.08" }))
 
-  -- Previous line (dimmed)
   local prevText = lyricsState.prev or ""
   if prevText ~= "" then
     table.insert(rows, ui.label({
-      text = truncateText(prevText, 18, currentPanelWidth),
+      text = prevText,
       fontSize = 18,
       fontWeight = "normal",
       color = "on_surface/0.3",
-      wrap = false,
+      wrap = true,
+      textAlign = "center",
     }))
   else
-    table.insert(rows, ui.box({ height = 18 })) -- spacer to keep layout stable
+    table.insert(rows, ui.box({ height = 18 }))
   end
 
-  -- Current line (bold, large, highlighted)
   local currentText = lyricsState.current or "..."
   table.insert(rows, ui.label({
-    text = truncateText(currentText, 26, currentPanelWidth),
+    text = currentText,
     fontSize = 26,
     fontWeight = "bold",
     color = "on_surface",
-    wrap = false,
+    wrap = true,
+    textAlign = "center",
   }))
 
-  -- Next line (dimmed)
   local nextText = lyricsState.next or ""
   if nextText ~= "" then
     table.insert(rows, ui.label({
-      text = truncateText(nextText, 18, currentPanelWidth),
+      text = nextText,
       fontSize = 18,
       fontWeight = "normal",
       color = "on_surface/0.3",
-      wrap = false,
+      wrap = true,
+      textAlign = "center",
     }))
   else
-    table.insert(rows, ui.box({ height = 18 })) -- spacer
+    table.insert(rows, ui.box({ height = 18 })) 
   end
 
-  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = currentPanelWidth }, rows))
+  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, rows))
 end
 
 function update()
@@ -169,6 +151,7 @@ function update()
   
   local state = readState()
   local targetWidth = BASE_WIDTH
+  local targetHeight = BASE_HEIGHT
   
   if state and state.status == "Playing" then
     local titleText = (state.title or "") .. " — " .. (state.artist or "")
@@ -177,10 +160,20 @@ function update()
     targetWidth = math.max(targetWidth, getLineWidth(state.current or "...", 26))
     targetWidth = math.max(targetWidth, getLineWidth(state.next or "", 26))
     targetWidth = math.max(targetWidth, getLineWidth(state.next_next or "", 26))
-    targetWidth = targetWidth + 16 -- Add extra safe buffer
+    targetWidth = targetWidth + 16
+
+    targetWidth = math.min(targetWidth, 1000)
+    
+    targetHeight = 20 + 20 
+    if state.title then targetHeight = targetHeight + 16 + 1 end
+    
+    targetHeight = targetHeight + (state.prev ~= "" and getLinesCount(state.prev, 18, targetWidth) * 26 or 18)
+    targetHeight = targetHeight + getLinesCount(state.current or "...", 26, targetWidth) * 36
+    targetHeight = targetHeight + (state.next ~= "" and getLinesCount(state.next, 18, targetWidth) * 26 or 18)
   end
   
   currentPanelWidth = currentPanelWidth + (targetWidth - currentPanelWidth) * math.min(1, delta * 6)
+  currentPanelHeight = currentPanelHeight + (targetHeight - currentPanelHeight) * math.min(1, delta * 6)
   
   render(state)
 end
