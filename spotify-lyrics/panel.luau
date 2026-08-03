@@ -180,11 +180,11 @@ function update()
   if state and state.status == "Playing" then
     local titleText = (state.title or "") .. " • " .. (state.artist or "")
     targetWidth = math.max(targetWidth, getLineWidth(titleText, 12))
-    targetWidth = math.max(targetWidth, getLineWidth(state.prev or "", 14))
+    targetWidth = math.max(targetWidth, getLineWidth(state.prev or "", 18))
     targetWidth = math.max(targetWidth, getLineWidth(state.current or "...", 18))
-    targetWidth = math.max(targetWidth, getLineWidth(state.next or "", 14))
-    targetWidth = math.max(targetWidth, getLineWidth(state.next_next or "", 14))
-    targetWidth = targetWidth + 32 -- Add padding
+    targetWidth = math.max(targetWidth, getLineWidth(state.next or "", 18))
+    targetWidth = math.max(targetWidth, getLineWidth(state.next_next or "", 18))
+    targetWidth = targetWidth + 48 -- Add padding with extra safe buffer
   end
   
   currentPanelWidth = currentPanelWidth + (targetWidth - currentPanelWidth) * math.min(1, delta * 6)
