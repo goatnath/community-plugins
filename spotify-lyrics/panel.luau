@@ -89,7 +89,7 @@ local function render(state)
           fontWeight = "medium",
           color = "on_surface/0.4",
           textAlign = "center",
-          wrap = false,
+          maxLines = 1,
         }),
       }),
       ui.label({
@@ -98,7 +98,7 @@ local function render(state)
         fontWeight = "bold",
         color = "on_surface/0.6",
         textAlign = "center",
-        wrap = false,
+        maxLines = 1,
       }),
     }))
     return
@@ -118,7 +118,7 @@ local function render(state)
         fontWeight = "medium",
         color = "primary/0.7",
         textAlign = "center",
-        wrap = false,
+        maxLines = 1,
       }),
     }))
     table.insert(rows, ui.box({ height = 1, fill = "on_surface/0.06" }))

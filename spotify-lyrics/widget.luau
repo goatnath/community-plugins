@@ -92,7 +92,7 @@ local function render(lyricsState)
         fontSize = 22,
         fontWeight = "bold",
         color = "on_surface/0.5",
-        wrap = false,
+        maxLines = 1,
       }),
     }))
     return
@@ -111,7 +111,7 @@ local function render(lyricsState)
         fontSize = 11,
         fontWeight = "medium",
         color = "primary/0.6",
-        wrap = false,
+        maxLines = 1,
       }),
     }))
   end
