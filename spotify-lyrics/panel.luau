@@ -2,9 +2,7 @@
 -- Lyrics panel: 3-line synced view (prev / current / next).
 
 local BASE_WIDTH = 460
-local BASE_HEIGHT = 160
 local currentPanelWidth = 460
-local currentPanelHeight = 160
 local lastClock = os.clock()
 
 local function charUnits(char)
@@ -39,15 +37,8 @@ local function getLineWidth(text, fontSize)
   for _, char in ipairs(toChars(text)) do
     units = units + charUnits(char)
   end
-  -- slightly conservative char width to anticipate wrapping
-  local charWidth = fontSize * 0.65 
+  local charWidth = fontSize * 0.75 
   return units * charWidth
-end
-
-local function getLinesCount(text, fontSize, maxWidth)
-  if not text or text == "" then return 0 end
-  local w = getLineWidth(text, fontSize)
-  return math.max(1, math.ceil(w / maxWidth))
 end
 
 local function readState()
@@ -59,7 +50,7 @@ end
 
 local function render(state)
   if not state or state.status == "Stopped" or state.status == "" then
-    panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
+    panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth }, {
       ui.row({ justify = "center" }, { ui.glyph({ name = "music", size = 28, color = "on_surface/0.2" }) }),
       ui.label({ text = "No music playing", fontSize = 14, fontWeight = "medium", color = "on_surface/0.25", textAlign = "center" }),
     }))
@@ -67,7 +58,7 @@ local function render(state)
   end
 
   if state.status == "Paused" then
-    panel.render(ui.column({ flexGrow = 1, gap = 6, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
+    panel.render(ui.column({ flexGrow = 1, gap = 6, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth }, {
       ui.row({ gap = 6, justify = "center", align = "center" }, {
         ui.glyph({ name = "player-pause", size = 16, color = "on_surface/0.3" }),
         ui.label({
@@ -145,8 +136,12 @@ local function render(state)
     table.insert(rows, ui.box({ height = 16 }))
   end
 
-  panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, rows))
+  -- Notice we removed minHeight completely, allowing the UI to vertically fit the wrapped text perfectly!
+  panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth }, rows))
 end
+
+local lastState = nil
+local fileCheckTimer = 0
 
 function update()
   noctalia.setUpdateInterval(33)
@@ -155,9 +150,14 @@ function update()
   local delta = lastClock > 0 and now - lastClock or 0
   lastClock = now
   
-  local state = readState()
+  fileCheckTimer = fileCheckTimer + delta
+  if fileCheckTimer >= 0.2 then
+    fileCheckTimer = 0
+    lastState = readState() or lastState
+  end
+  
+  local state = lastState
   local targetWidth = BASE_WIDTH
-  local targetHeight = BASE_HEIGHT
   
   if state and state.status == "Playing" then
     local titleText = (state.title or "") .. " • " .. (state.artist or "")
@@ -166,22 +166,11 @@ function update()
     targetWidth = math.max(targetWidth, getLineWidth(state.current or "...", 18))
     targetWidth = math.max(targetWidth, getLineWidth(state.next or "", 18))
     targetWidth = math.max(targetWidth, getLineWidth(state.next_next or "", 18))
-    targetWidth = targetWidth + 48 
-
-    -- Limit target width to a reasonable maximum so it wraps on small screens
-    targetWidth = math.min(targetWidth, 800)
-    
-    local innerW = targetWidth - 32
-    targetHeight = 32 + 24 -- padding + gaps
-    if state.title then targetHeight = targetHeight + 18 + 1 end
-    
-    targetHeight = targetHeight + (state.prev ~= "" and getLinesCount(state.prev, 14, innerW) * 20 or 16)
-    targetHeight = targetHeight + getLinesCount(state.current or "...", 18, innerW) * 26
-    targetHeight = targetHeight + (state.next ~= "" and getLinesCount(state.next, 14, innerW) * 20 or 16)
+    targetWidth = targetWidth + 64 
+    targetWidth = math.min(targetWidth, 1600) -- Massive max width to prevent any wrapping
   end
   
   currentPanelWidth = currentPanelWidth + (targetWidth - currentPanelWidth) * math.min(1, delta * 6)
-  currentPanelHeight = currentPanelHeight + (targetHeight - currentPanelHeight) * math.min(1, delta * 6)
   
   render(state)
 end

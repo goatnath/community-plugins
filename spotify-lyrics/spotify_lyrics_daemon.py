@@ -185,7 +185,7 @@ class SpotifyLyricsDaemon:
             
             # Update more frequently if playing to maintain tight sync
             if player["status"] == "Playing":
-                time.sleep(0.1)  # Faster updates (100ms) for ultra-tight sync
+                time.sleep(0.3)  # Reduce polling frequency to prevent massive OS subprocess leak
             else:
                 time.sleep(1.0)
 
