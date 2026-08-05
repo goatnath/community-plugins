@@ -3,6 +3,8 @@
 
 local BASE_WIDTH = 400
 local BASE_HEIGHT = 160
+local currentPanelHeight = 160
+local lastClock = os.clock()
 
 local function charUnits(char)
   if char == " " or char == "\t" then return 0.35 end
@@ -36,21 +38,15 @@ local function getLineWidth(text, fontSize)
   for _, char in ipairs(toChars(text)) do
     units = units + charUnits(char)
   end
-  local charWidth = fontSize * 0.70 
+  local charWidth = fontSize * 0.80 
   return units * charWidth
 end
 
-local function getDynamicFontSize(text, defaultSize, maxWidth)
-  if not text or text == "" then return defaultSize end
-  local width = getLineWidth(text, defaultSize)
-  if width <= maxWidth then return defaultSize end
-  
-  -- Scale down font size so it attempts to fit on 1-2 lines without massive vertical growth
-  local scale = maxWidth / width
-  local minSize = math.max(10, math.floor(defaultSize * 0.6))
-  local newSize = math.floor(defaultSize * scale)
-  
-  return math.max(minSize, newSize)
+local function getLinesCount(text, fontSize, availableWidth)
+  if not text or text == "" then return 0 end
+  local textWidth = getLineWidth(text, fontSize)
+  local safeWidth = availableWidth * 0.80 
+  return math.max(1, math.ceil(textWidth / safeWidth))
 end
 
 local function readState()
@@ -62,7 +58,7 @@ end
 
 local function render(lyricsState)
   if not lyricsState or lyricsState.status == "Stopped" or lyricsState.status == "" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = BASE_WIDTH, minHeight = BASE_HEIGHT }, {
+    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
       ui.glyph({ name = "music", size = 28, color = "on_surface/0.3" }),
       ui.label({
         text = "No music playing",
@@ -75,7 +71,7 @@ local function render(lyricsState)
   end
 
   if lyricsState.status == "Paused" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = BASE_WIDTH, minHeight = BASE_HEIGHT }, {
+    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
       ui.glyph({ name = "player-pause", size = 22, color = "on_surface/0.4" }),
       ui.label({
         text = lyricsState.current or "Paused",
@@ -88,7 +84,6 @@ local function render(lyricsState)
     return
   end
 
-  local innerW = BASE_WIDTH - 20
   local rows = {}
 
   if lyricsState.title and lyricsState.artist then
@@ -110,7 +105,7 @@ local function render(lyricsState)
   if prevText ~= "" then
     table.insert(rows, ui.label({
       text = prevText,
-      fontSize = getDynamicFontSize(prevText, 18, innerW),
+      fontSize = 18,
       fontWeight = "normal",
       color = "on_surface/0.3",
       wrap = true,
@@ -123,7 +118,7 @@ local function render(lyricsState)
   local currentText = lyricsState.current or "..."
   table.insert(rows, ui.label({
     text = currentText,
-    fontSize = getDynamicFontSize(currentText, 26, innerW),
+    fontSize = 26,
     fontWeight = "bold",
     color = "on_surface",
     wrap = true,
@@ -134,7 +129,7 @@ local function render(lyricsState)
   if nextText ~= "" then
     table.insert(rows, ui.label({
       text = nextText,
-      fontSize = getDynamicFontSize(nextText, 18, innerW),
+      fontSize = 18,
       fontWeight = "normal",
       color = "on_surface/0.3",
       wrap = true,
@@ -144,17 +139,18 @@ local function render(lyricsState)
     table.insert(rows, ui.box({ height = 18 })) 
   end
 
-  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = BASE_WIDTH, minHeight = BASE_HEIGHT }, rows))
+  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, rows))
 end
 
 local lastState = nil
 local fileCheckTimer = 0
 
 function update()
-  noctalia.setUpdateInterval(100)
+  noctalia.setUpdateInterval(33)
   
   local now = os.clock()
-  local delta = 0.1
+  local delta = lastClock > 0 and now - lastClock or 0
+  lastClock = now
   
   fileCheckTimer = fileCheckTimer + delta
   if fileCheckTimer >= 0.2 then
@@ -162,5 +158,28 @@ function update()
     lastState = readState() or lastState
   end
   
-  render(lastState)
+  local state = lastState
+  local targetHeight = BASE_HEIGHT
+  
+  if state and state.status == "Playing" then
+    local innerW = BASE_WIDTH - 20
+    targetHeight = 20 + 20 
+    if state.title then targetHeight = targetHeight + 16 + 1 end
+    
+    -- Very safe line heights for widget font sizes (26, 18)
+    targetHeight = targetHeight + (state.prev ~= "" and getLinesCount(state.prev, 18, innerW) * 26 or 18)
+    targetHeight = targetHeight + getLinesCount(state.current or "...", 26, innerW) * 36
+    targetHeight = targetHeight + (state.next ~= "" and getLinesCount(state.next, 18, innerW) * 26 or 18)
+    
+    -- Massive safety padding at the bottom
+    targetHeight = targetHeight + 42
+  end
+  
+  if targetHeight > currentPanelHeight then
+    currentPanelHeight = targetHeight
+  else
+    currentPanelHeight = currentPanelHeight + (targetHeight - currentPanelHeight) * math.min(1, delta * 6)
+  end
+  
+  render(state)
 end
