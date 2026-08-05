@@ -19,3 +19,5 @@ entry = "bar.luau"
 [[panel]]
 id = "lyrics-panel"
 entry = "panel.luau"
+width = 460
+height = 280
