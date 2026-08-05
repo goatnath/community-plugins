@@ -2,7 +2,9 @@
 -- Spotify Lyrics desktop widget.
 
 local BASE_WIDTH = 400
+local BASE_HEIGHT = 160
 local currentPanelWidth = 400
+local currentPanelHeight = 160
 local lastClock = os.clock()
 
 local function charUnits(char)
@@ -37,8 +39,17 @@ local function getLineWidth(text, fontSize)
   for _, char in ipairs(toChars(text)) do
     units = units + charUnits(char)
   end
-  local charWidth = fontSize * 0.75 
+  -- Overestimate character width slightly to be safe
+  local charWidth = fontSize * 0.70 
   return units * charWidth
+end
+
+local function getLinesCount(text, fontSize, availableWidth)
+  if not text or text == "" then return 0 end
+  local textWidth = getLineWidth(text, fontSize)
+  -- Underestimate available width to safely OVERESTIMATE line count
+  local safeWidth = availableWidth * 0.85 
+  return math.max(1, math.ceil(textWidth / safeWidth))
 end
 
 local function readState()
@@ -50,7 +61,7 @@ end
 
 local function render(lyricsState)
   if not lyricsState or lyricsState.status == "Stopped" or lyricsState.status == "" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth }, {
+    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
       ui.glyph({ name = "music", size = 28, color = "on_surface/0.3" }),
       ui.label({
         text = "No music playing",
@@ -63,7 +74,7 @@ local function render(lyricsState)
   end
 
   if lyricsState.status == "Paused" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth }, {
+    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
       ui.glyph({ name = "player-pause", size = 22, color = "on_surface/0.4" }),
       ui.label({
         text = lyricsState.current or "Paused",
@@ -131,7 +142,7 @@ local function render(lyricsState)
     table.insert(rows, ui.box({ height = 18 })) 
   end
 
-  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = currentPanelWidth }, rows))
+  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, rows))
 end
 
 local lastState = nil
@@ -152,6 +163,7 @@ function update()
   
   local state = lastState
   local targetWidth = BASE_WIDTH
+  local targetHeight = BASE_HEIGHT
   
   if state and state.status == "Playing" then
     local titleText = (state.title or "") .. " — " .. (state.artist or "")
@@ -160,11 +172,32 @@ function update()
     targetWidth = math.max(targetWidth, getLineWidth(state.current or "...", 26))
     targetWidth = math.max(targetWidth, getLineWidth(state.next or "", 26))
     targetWidth = math.max(targetWidth, getLineWidth(state.next_next or "", 26))
-    targetWidth = targetWidth + 64
-    targetWidth = math.min(targetWidth, 1600)
+    targetWidth = targetWidth + 16
+    
+    -- Limit width to a reasonable physical bound (like 1000px).
+    -- If text exceeds this, it will wrap, and targetHeight will accurately encapsulate it!
+    targetWidth = math.min(targetWidth, 1000)
+    
+    local innerW = targetWidth - 20
+    targetHeight = 20 + 20 
+    if state.title then targetHeight = targetHeight + 16 + 1 end
+    
+    targetHeight = targetHeight + (state.prev ~= "" and getLinesCount(state.prev, 18, innerW) * 26 or 18)
+    targetHeight = targetHeight + getLinesCount(state.current or "...", 26, innerW) * 36
+    targetHeight = targetHeight + (state.next ~= "" and getLinesCount(state.next, 18, innerW) * 26 or 18)
+    
+    -- Extra safety padding at the bottom to guarantee no clipping!
+    targetHeight = targetHeight + 16
   end
   
   currentPanelWidth = currentPanelWidth + (targetWidth - currentPanelWidth) * math.min(1, delta * 6)
+  
+  -- Snap height up instantly to prevent spilling during expansion, but shrink smoothly
+  if targetHeight > currentPanelHeight then
+    currentPanelHeight = targetHeight
+  else
+    currentPanelHeight = currentPanelHeight + (targetHeight - currentPanelHeight) * math.min(1, delta * 6)
+  end
   
   render(state)
 end
