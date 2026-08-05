@@ -1,53 +1,71 @@
 --!nonstrict
--- Spotify Lyrics desktop widget.
+-- Spotify Lyrics Desktop Widget – floating overlay version.
+--
+-- Same data source as panel.luau but rendered via desktopWidget.render()
+-- with larger font sizes for desktop readability.
 
-local BASE_WIDTH = 400
-local BASE_HEIGHT = 160
-local currentPanelHeight = 160
-local lastClock = os.clock()
+--------------------------------------------------------------------------------
+-- Layout constants
+--------------------------------------------------------------------------------
+local WIDGET_WIDTH   = 400
+local WIDGET_PADDING = 10
+local INNER_WIDTH    = WIDGET_WIDTH - WIDGET_PADDING * 2  -- 380px usable
+local MIN_HEIGHT     = 160
 
-local function charUnits(char)
-  if char == " " or char == "\t" then return 0.35 end
-  local byte = char:byte(1) or 0
-  if byte < 0x80 then
-    if char:match("[%.,:;!'|ilI%-%(%)]") then return 0.38 end
-    if char:match("[MW@#%%&]") then return 0.85 end
-    return 0.58
-  end
-  return 1
-end
+--------------------------------------------------------------------------------
+-- Runtime state
+--------------------------------------------------------------------------------
+local currentHeight = MIN_HEIGHT
+local lastState     = nil
+local lastClock     = os.clock()
 
-local function toChars(text)
-  local chars = {}
-  local i = 1
-  while i <= #text do
-    local byte = text:byte(i)
-    local length = 1
-    if byte >= 0xF0 then length = 4
-    elseif byte >= 0xE0 then length = 3
-    elseif byte >= 0xC0 then length = 2 end
-    chars[#chars + 1] = text:sub(i, i + length - 1)
-    i = i + length
-  end
-  return chars
-end
+--------------------------------------------------------------------------------
+-- Height estimation (see panel.luau for rationale)
+--------------------------------------------------------------------------------
 
-local function getLineWidth(text, fontSize)
+local function estimateLines(text, fontSize)
   if not text or text == "" then return 0 end
-  local units = 0
-  for _, char in ipairs(toChars(text)) do
-    units = units + charUnits(char)
-  end
-  local charWidth = fontSize * 0.80 
-  return units * charWidth
+  local charsPerLine = math.max(1, math.floor(INNER_WIDTH / (fontSize * 0.60)))
+  return math.max(1, math.ceil(#text / charsPerLine))
 end
 
-local function getLinesCount(text, fontSize, availableWidth)
-  if not text or text == "" then return 0 end
-  local textWidth = getLineWidth(text, fontSize)
-  local safeWidth = availableWidth * 0.80 
-  return math.max(1, math.ceil(textWidth / safeWidth))
+local function estimateContentHeight(state)
+  local h = WIDGET_PADDING * 2
+
+  -- Header
+  if state.title and state.artist then
+    h = h + 12                                                            -- icon
+    h = h + 6                                                             -- gap
+    h = h + estimateLines(state.title .. " — " .. state.artist, 11) * 16  -- title
+    h = h + 10 + 1 + 10                                                  -- gap, divider, gap
+  end
+
+  -- Previous lyric (fontSize 18, ~26px line height)
+  if (state.prev or "") ~= "" then
+    h = h + estimateLines(state.prev, 18) * 26
+  else
+    h = h + 18
+  end
+  h = h + 10  -- gap
+
+  -- Current lyric (fontSize 26 bold, ~37px line height)
+  h = h + estimateLines(state.current or "...", 26) * 37
+  h = h + 10  -- gap
+
+  -- Next lyric (fontSize 18, ~26px line height)
+  if (state.next or "") ~= "" then
+    h = h + estimateLines(state.next, 18) * 26
+  else
+    h = h + 18
+  end
+
+  h = h + 24  -- safety buffer
+  return math.max(MIN_HEIGHT, h)
 end
+
+--------------------------------------------------------------------------------
+-- State I/O
+--------------------------------------------------------------------------------
 
 local function readState()
   local content = noctalia.readFile("~/.cache/noctalia/lyrics/current.json")
@@ -56,130 +74,122 @@ local function readState()
   return state
 end
 
-local function render(lyricsState)
-  if not lyricsState or lyricsState.status == "Stopped" or lyricsState.status == "" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
-      ui.glyph({ name = "music", size = 28, color = "on_surface/0.3" }),
-      ui.label({
-        text = "No music playing",
-        fontSize = 16,
-        fontWeight = "medium",
-        color = "on_surface/0.3",
-      }),
-    }))
-    return
-  end
+--------------------------------------------------------------------------------
+-- Rendering
+--------------------------------------------------------------------------------
 
-  if lyricsState.status == "Paused" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
-      ui.glyph({ name = "player-pause", size = 22, color = "on_surface/0.4" }),
-      ui.label({
-        text = lyricsState.current or "Paused",
-        fontSize = 22,
-        fontWeight = "bold",
-        color = "on_surface/0.5",
-        wrap = true,
-      }),
-    }))
-    return
-  end
+local function renderEmpty()
+  desktopWidget.render(ui.column({
+    gap = 8, align = "center", justify = "center",
+    minWidth = WIDGET_WIDTH, minHeight = currentHeight,
+  }, {
+    ui.glyph({ name = "music", size = 28, color = "on_surface/0.3" }),
+    ui.label({
+      text = "No music playing",
+      fontSize = 16, fontWeight = "medium", color = "on_surface/0.3",
+    }),
+  }))
+end
 
+local function renderPaused(state)
+  desktopWidget.render(ui.column({
+    gap = 8, align = "center", justify = "center",
+    minWidth = WIDGET_WIDTH, minHeight = currentHeight,
+  }, {
+    ui.glyph({ name = "player-pause", size = 22, color = "on_surface/0.4" }),
+    ui.label({
+      text = state.current or "Paused",
+      fontSize = 22, fontWeight = "bold",
+      color = "on_surface/0.5", wrap = true, textAlign = "center",
+    }),
+  }))
+end
+
+local function renderPlaying(state)
   local rows = {}
 
-  if lyricsState.title and lyricsState.artist then
+  -- Track header
+  if state.title and state.artist then
     table.insert(rows, ui.row({ gap = 6, align = "center" }, {
       ui.glyph({ name = "music", size = 12, color = "primary/0.7" }),
       ui.label({
-        text = lyricsState.title .. " — " .. lyricsState.artist,
-        fontSize = 11,
-        fontWeight = "medium",
-        color = "primary/0.6",
-        wrap = true,
+        text = state.title .. " — " .. state.artist,
+        fontSize = 11, fontWeight = "medium",
+        color = "primary/0.6", wrap = true,
       }),
     }))
+    table.insert(rows, ui.box({ height = 1, fill = "on_surface/0.08" }))
   end
 
-  table.insert(rows, ui.box({ height = 1, fill = "on_surface/0.08" }))
-
-  local prevText = lyricsState.prev or ""
-  if prevText ~= "" then
+  -- Previous lyric
+  if (state.prev or "") ~= "" then
     table.insert(rows, ui.label({
-      text = prevText,
-      fontSize = 18,
-      fontWeight = "normal",
-      color = "on_surface/0.3",
-      wrap = true,
-      textAlign = "center",
+      text = state.prev,
+      fontSize = 18, fontWeight = "normal",
+      color = "on_surface/0.3", textAlign = "center", wrap = true,
     }))
   else
     table.insert(rows, ui.box({ height = 18 }))
   end
 
-  local currentText = lyricsState.current or "..."
+  -- Current lyric (large, bold)
   table.insert(rows, ui.label({
-    text = currentText,
-    fontSize = 26,
-    fontWeight = "bold",
-    color = "on_surface",
-    wrap = true,
-    textAlign = "center",
+    text = state.current or "...",
+    fontSize = 26, fontWeight = "bold",
+    color = "on_surface", textAlign = "center", wrap = true,
   }))
 
-  local nextText = lyricsState.next or ""
-  if nextText ~= "" then
+  -- Next lyric
+  if (state.next or "") ~= "" then
     table.insert(rows, ui.label({
-      text = nextText,
-      fontSize = 18,
-      fontWeight = "normal",
-      color = "on_surface/0.3",
-      wrap = true,
-      textAlign = "center",
+      text = state.next,
+      fontSize = 18, fontWeight = "normal",
+      color = "on_surface/0.3", textAlign = "center", wrap = true,
     }))
   else
-    table.insert(rows, ui.box({ height = 18 })) 
+    table.insert(rows, ui.box({ height = 18 }))
   end
 
-  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, rows))
+  desktopWidget.render(ui.column({
+    gap = 10, align = "center", justify = "center",
+    minWidth = WIDGET_WIDTH, minHeight = currentHeight,
+  }, rows))
 end
 
-local lastState = nil
-local fileCheckTimer = 0
+local function render(state)
+  if not state or state.status == "Stopped" or state.status == "" then
+    renderEmpty()
+  elseif state.status == "Paused" then
+    renderPaused(state)
+  else
+    renderPlaying(state)
+  end
+end
+
+--------------------------------------------------------------------------------
+-- Update loop
+--------------------------------------------------------------------------------
 
 function update()
-  noctalia.setUpdateInterval(33)
-  
+  noctalia.setUpdateInterval(100)
+
   local now = os.clock()
   local delta = lastClock > 0 and now - lastClock or 0
   lastClock = now
-  
-  fileCheckTimer = fileCheckTimer + delta
-  if fileCheckTimer >= 0.2 then
-    fileCheckTimer = 0
-    lastState = readState() or lastState
+
+  lastState = readState() or lastState
+
+  local targetHeight = MIN_HEIGHT
+  if lastState and lastState.status == "Playing" then
+    targetHeight = estimateContentHeight(lastState)
   end
-  
-  local state = lastState
-  local targetHeight = BASE_HEIGHT
-  
-  if state and state.status == "Playing" then
-    local innerW = BASE_WIDTH - 20
-    targetHeight = 20 + 20 
-    if state.title then targetHeight = targetHeight + 16 + 1 end
-    
-    -- Very safe line heights for widget font sizes (26, 18)
-    targetHeight = targetHeight + (state.prev ~= "" and getLinesCount(state.prev, 18, innerW) * 26 or 18)
-    targetHeight = targetHeight + getLinesCount(state.current or "...", 26, innerW) * 36
-    targetHeight = targetHeight + (state.next ~= "" and getLinesCount(state.next, 18, innerW) * 26 or 18)
-    
-    -- Massive safety padding at the bottom
-    targetHeight = targetHeight + 42
-  end
-  
-  if targetHeight > currentPanelHeight then
-    currentPanelHeight = targetHeight
+
+  -- Grow instantly, shrink smoothly
+  if targetHeight > currentHeight then
+    currentHeight = targetHeight
   else
-    currentPanelHeight = currentPanelHeight + (targetHeight - currentPanelHeight) * math.min(1, delta * 6)
+    currentHeight = currentHeight + (targetHeight - currentHeight) * math.min(1, delta * 4)
   end
-  
-  render(state)
+
+  render(lastState)
 end
