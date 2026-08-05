@@ -3,9 +3,6 @@
 
 local BASE_WIDTH = 460
 local BASE_HEIGHT = 160
-local currentPanelWidth = 460
-local currentPanelHeight = 160
-local lastClock = os.clock()
 
 local function charUnits(char)
   if char == " " or char == "\t" then return 0.35 end
@@ -39,17 +36,23 @@ local function getLineWidth(text, fontSize)
   for _, char in ipairs(toChars(text)) do
     units = units + charUnits(char)
   end
-  -- Overestimate character width slightly to be safe
   local charWidth = fontSize * 0.70 
   return units * charWidth
 end
 
-local function getLinesCount(text, fontSize, availableWidth)
-  if not text or text == "" then return 0 end
-  local textWidth = getLineWidth(text, fontSize)
-  -- Underestimate available width to safely OVERESTIMATE line count
-  local safeWidth = availableWidth * 0.85 
-  return math.max(1, math.ceil(textWidth / safeWidth))
+local function getDynamicFontSize(text, defaultSize, maxWidth)
+  if not text or text == "" then return defaultSize end
+  local width = getLineWidth(text, defaultSize)
+  if width <= maxWidth then return defaultSize end
+  
+  -- Scale down font size so it attempts to fit on 1-2 lines without massive vertical growth
+  local scale = maxWidth / width
+  -- If it's extremely long, we allow it to wrap by capping the minimum font size.
+  -- A smaller font size wrapping to 2 lines takes up the same height as a large font on 1 line!
+  local minSize = math.max(10, math.floor(defaultSize * 0.6))
+  local newSize = math.floor(defaultSize * scale)
+  
+  return math.max(minSize, newSize)
 end
 
 local function readState()
@@ -61,7 +64,7 @@ end
 
 local function render(state)
   if not state or state.status == "Stopped" or state.status == "" then
-    panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
+    panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = BASE_HEIGHT }, {
       ui.row({ justify = "center" }, { ui.glyph({ name = "music", size = 28, color = "on_surface/0.2" }) }),
       ui.label({ text = "No music playing", fontSize = 14, fontWeight = "medium", color = "on_surface/0.25", textAlign = "center" }),
     }))
@@ -69,7 +72,7 @@ local function render(state)
   end
 
   if state.status == "Paused" then
-    panel.render(ui.column({ flexGrow = 1, gap = 6, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
+    panel.render(ui.column({ flexGrow = 1, gap = 6, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = BASE_HEIGHT }, {
       ui.row({ gap = 6, justify = "center", align = "center" }, {
         ui.glyph({ name = "player-pause", size = 16, color = "on_surface/0.3" }),
         ui.label({
@@ -93,6 +96,7 @@ local function render(state)
     return
   end
 
+  local innerW = BASE_WIDTH - 32
   local rows = {}
 
   if state.title and state.artist then
@@ -114,7 +118,7 @@ local function render(state)
   if prevText ~= "" then
     table.insert(rows, ui.label({
       text = prevText,
-      fontSize = 14,
+      fontSize = getDynamicFontSize(prevText, 14, innerW),
       fontWeight = "medium",
       color = "on_surface/0.4",
       wrap = true,
@@ -124,9 +128,10 @@ local function render(state)
     table.insert(rows, ui.box({ height = 16 }))
   end
 
+  local currentText = state.current or "..."
   table.insert(rows, ui.label({
-    text = state.current or "...",
-    fontSize = 18,
+    text = currentText,
+    fontSize = getDynamicFontSize(currentText, 18, innerW),
     fontWeight = "bold",
     color = "on_surface/0.95",
     wrap = true,
@@ -137,7 +142,7 @@ local function render(state)
   if nextText ~= "" then
     table.insert(rows, ui.label({
       text = nextText,
-      fontSize = 14,
+      fontSize = getDynamicFontSize(nextText, 14, innerW),
       fontWeight = "medium",
       color = "on_surface/0.4",
       wrap = true,
@@ -147,18 +152,17 @@ local function render(state)
     table.insert(rows, ui.box({ height = 16 }))
   end
 
-  panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, rows))
+  panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = BASE_HEIGHT }, rows))
 end
 
 local lastState = nil
 local fileCheckTimer = 0
 
 function update()
-  noctalia.setUpdateInterval(33)
+  noctalia.setUpdateInterval(100)
   
   local now = os.clock()
-  local delta = lastClock > 0 and now - lastClock or 0
-  lastClock = now
+  local delta = 0.1
   
   fileCheckTimer = fileCheckTimer + delta
   if fileCheckTimer >= 0.2 then
@@ -166,28 +170,5 @@ function update()
     lastState = readState() or lastState
   end
   
-  local state = lastState
-  local targetHeight = BASE_HEIGHT
-  
-  if state and state.status == "Playing" then
-    local innerW = BASE_WIDTH - 32
-    targetHeight = 32 + 24 -- padding + gaps
-    if state.title then targetHeight = targetHeight + 18 + 1 end
-    
-    targetHeight = targetHeight + (state.prev ~= "" and getLinesCount(state.prev, 14, innerW) * 20 or 16)
-    targetHeight = targetHeight + getLinesCount(state.current or "...", 18, innerW) * 26
-    targetHeight = targetHeight + (state.next ~= "" and getLinesCount(state.next, 14, innerW) * 20 or 16)
-    
-    -- Extra safety padding at the bottom to guarantee no clipping!
-    targetHeight = targetHeight + 16
-  end
-  
-  -- Snap height up instantly to prevent spilling during expansion, but shrink smoothly
-  if targetHeight > currentPanelHeight then
-    currentPanelHeight = targetHeight
-  else
-    currentPanelHeight = currentPanelHeight + (targetHeight - currentPanelHeight) * math.min(1, delta * 6)
-  end
-  
-  render(state)
+  render(lastState)
 end
