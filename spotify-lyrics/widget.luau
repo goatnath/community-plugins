@@ -3,6 +3,7 @@
 --
 -- Same data source as panel.luau but rendered via desktopWidget.render()
 -- with larger font sizes for desktop readability.
+-- Long lyrics are dynamically scaled to smaller fonts to prevent overflow.
 
 --------------------------------------------------------------------------------
 -- Layout constants
@@ -20,7 +21,19 @@ local lastState     = nil
 local lastClock     = os.clock()
 
 --------------------------------------------------------------------------------
--- Height estimation (see panel.luau for rationale)
+-- Dynamic font sizing (see panel.luau for rationale)
+--------------------------------------------------------------------------------
+
+local function fitFontSize(text, defaultSize)
+  if not text or text == "" then return defaultSize end
+  local len = #text
+  if len <= 40 then return defaultSize end
+  local reduction = math.floor((len - 40) / 15) * 2
+  return math.max(11, defaultSize - reduction)
+end
+
+--------------------------------------------------------------------------------
+-- Height estimation
 --------------------------------------------------------------------------------
 
 local function estimateLines(text, fontSize)
@@ -32,34 +45,31 @@ end
 local function estimateContentHeight(state)
   local h = WIDGET_PADDING * 2
 
-  -- Header
   if state.title and state.artist then
-    h = h + 12                                                            -- icon
-    h = h + 6                                                             -- gap
-    h = h + estimateLines(state.title .. " — " .. state.artist, 11) * 16  -- title
-    h = h + 10 + 1 + 10                                                  -- gap, divider, gap
+    h = h + 12 + 6 + estimateLines(state.title .. " — " .. state.artist, 11) * 16
+    h = h + 10 + 1 + 10
   end
 
-  -- Previous lyric (fontSize 18, ~26px line height)
+  local prevSize = fitFontSize(state.prev, 18)
   if (state.prev or "") ~= "" then
-    h = h + estimateLines(state.prev, 18) * 26
+    h = h + estimateLines(state.prev, prevSize) * math.ceil(prevSize * 1.4)
   else
     h = h + 18
   end
-  h = h + 10  -- gap
+  h = h + 10
 
-  -- Current lyric (fontSize 26 bold, ~37px line height)
-  h = h + estimateLines(state.current or "...", 26) * 37
-  h = h + 10  -- gap
+  local currentSize = fitFontSize(state.current, 26)
+  h = h + estimateLines(state.current or "...", currentSize) * math.ceil(currentSize * 1.4)
+  h = h + 10
 
-  -- Next lyric (fontSize 18, ~26px line height)
+  local nextSize = fitFontSize(state.next, 18)
   if (state.next or "") ~= "" then
-    h = h + estimateLines(state.next, 18) * 26
+    h = h + estimateLines(state.next, nextSize) * math.ceil(nextSize * 1.4)
   else
     h = h + 18
   end
 
-  h = h + 24  -- safety buffer
+  h = h + 24
   return math.max(MIN_HEIGHT, h)
 end
 
@@ -121,29 +131,32 @@ local function renderPlaying(state)
     table.insert(rows, ui.box({ height = 1, fill = "on_surface/0.08" }))
   end
 
-  -- Previous lyric
-  if (state.prev or "") ~= "" then
+  -- Previous lyric (dynamically scaled)
+  local prevText = state.prev or ""
+  if prevText ~= "" then
     table.insert(rows, ui.label({
-      text = state.prev,
-      fontSize = 18, fontWeight = "normal",
+      text = prevText,
+      fontSize = fitFontSize(prevText, 18), fontWeight = "normal",
       color = "on_surface/0.3", textAlign = "center", wrap = true,
     }))
   else
     table.insert(rows, ui.box({ height = 18 }))
   end
 
-  -- Current lyric (large, bold)
+  -- Current lyric (dynamically scaled)
+  local currentText = state.current or "..."
   table.insert(rows, ui.label({
-    text = state.current or "...",
-    fontSize = 26, fontWeight = "bold",
+    text = currentText,
+    fontSize = fitFontSize(currentText, 26), fontWeight = "bold",
     color = "on_surface", textAlign = "center", wrap = true,
   }))
 
-  -- Next lyric
-  if (state.next or "") ~= "" then
+  -- Next lyric (dynamically scaled)
+  local nextText = state.next or ""
+  if nextText ~= "" then
     table.insert(rows, ui.label({
-      text = state.next,
-      fontSize = 18, fontWeight = "normal",
+      text = nextText,
+      fontSize = fitFontSize(nextText, 18), fontWeight = "normal",
       color = "on_surface/0.3", textAlign = "center", wrap = true,
     }))
   else
@@ -184,7 +197,6 @@ function update()
     targetHeight = estimateContentHeight(lastState)
   end
 
-  -- Grow instantly, shrink smoothly
   if targetHeight > currentHeight then
     currentHeight = targetHeight
   else

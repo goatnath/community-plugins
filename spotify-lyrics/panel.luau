@@ -2,8 +2,10 @@
 -- Spotify Lyrics Panel – 3-line synced lyrics view.
 --
 -- Reads state from ~/.cache/noctalia/lyrics/current.json (written by the daemon)
--- and renders prev / current / next lyric lines. Panel height dynamically
--- expands when lyrics wrap to multiple lines, preventing text overflow.
+-- and renders prev / current / next lyric lines.
+--
+-- Long lyrics are dynamically scaled to a smaller font size so they take up
+-- less vertical space and never overflow the panel.
 
 --------------------------------------------------------------------------------
 -- Layout constants
@@ -21,57 +23,60 @@ local lastState     = nil
 local lastClock     = os.clock()
 
 --------------------------------------------------------------------------------
--- Height estimation
+-- Dynamic font sizing
 --
--- The old per-character width table consistently underestimated real rendered
--- widths, causing getLinesCount to return too few lines.  We now use a dead-
--- simple heuristic: divide #text (byte length) by a conservative chars-per-
--- line estimate.  For ASCII lyrics the byte count equals char count; for any
--- multibyte chars it *overestimates*, which is the safe direction.
+-- Scale font size down for long lyrics to reduce wrapping.
+-- Short text (<=40 chars) keeps the default size.
+-- Every 15 chars beyond 40 reduces font by 2px, capped at a readable minimum.
 --------------------------------------------------------------------------------
 
---- Estimate how many visual lines `text` occupies at `fontSize` inside INNER_WIDTH.
+local function fitFontSize(text, defaultSize)
+  if not text or text == "" then return defaultSize end
+  local len = #text
+  if len <= 40 then return defaultSize end
+  local reduction = math.floor((len - 40) / 15) * 2
+  return math.max(10, defaultSize - reduction)
+end
+
+--------------------------------------------------------------------------------
+-- Height estimation (backup safety for minHeight)
+--------------------------------------------------------------------------------
+
 local function estimateLines(text, fontSize)
   if not text or text == "" then return 0 end
-  -- Each character is roughly 0.60 × fontSize pixels wide on average.
-  -- This intentionally overestimates character width, producing fewer
-  -- chars-per-line → more estimated lines → more allocated height.
   local charsPerLine = math.max(1, math.floor(INNER_WIDTH / (fontSize * 0.60)))
   return math.max(1, math.ceil(#text / charsPerLine))
 end
 
---- Compute total pixel height the panel content will need.
 local function estimateContentHeight(state)
-  local h = PANEL_PADDING * 2  -- top + bottom padding
+  local h = PANEL_PADDING * 2
 
-  -- Header: music icon + title text + divider
   if state.title and state.artist then
-    h = h + 14                                                           -- icon
-    h = h + 4                                                            -- gap in header column
-    h = h + estimateLines(state.title .. " • " .. state.artist, 12) * 18 -- title
-    h = h + 8 + 1 + 8                                                   -- gap, divider, gap
+    local titleSize = 12
+    h = h + 14 + 4 + estimateLines(state.title .. " • " .. state.artist, titleSize) * 18
+    h = h + 8 + 1 + 8
   end
 
-  -- Previous lyric (fontSize 14, ~20px line height)
+  local prevSize = fitFontSize(state.prev, 14)
   if (state.prev or "") ~= "" then
-    h = h + estimateLines(state.prev, 14) * 20
+    h = h + estimateLines(state.prev, prevSize) * math.ceil(prevSize * 1.4)
   else
     h = h + 16
   end
-  h = h + 8  -- gap
+  h = h + 8
 
-  -- Current lyric (fontSize 18 bold, ~26px line height)
-  h = h + estimateLines(state.current or "...", 18) * 26
-  h = h + 8  -- gap
+  local currentSize = fitFontSize(state.current, 18)
+  h = h + estimateLines(state.current or "...", currentSize) * math.ceil(currentSize * 1.4)
+  h = h + 8
 
-  -- Next lyric (fontSize 14, ~20px line height)
+  local nextSize = fitFontSize(state.next, 14)
   if (state.next or "") ~= "" then
-    h = h + estimateLines(state.next, 14) * 20
+    h = h + estimateLines(state.next, nextSize) * math.ceil(nextSize * 1.4)
   else
     h = h + 16
   end
 
-  h = h + 24  -- safety buffer for font rendering variance
+  h = h + 24  -- safety buffer
   return math.max(MIN_HEIGHT, h)
 end
 
@@ -145,29 +150,32 @@ local function renderPlaying(state)
     table.insert(rows, ui.box({ height = 1, fill = "on_surface/0.06" }))
   end
 
-  -- Previous lyric (faded)
-  if (state.prev or "") ~= "" then
+  -- Previous lyric (dynamically scaled font)
+  local prevText = state.prev or ""
+  if prevText ~= "" then
     table.insert(rows, ui.label({
-      text = state.prev,
-      fontSize = 14, fontWeight = "medium",
+      text = prevText,
+      fontSize = fitFontSize(prevText, 14), fontWeight = "medium",
       color = "on_surface/0.4", textAlign = "center", wrap = true,
     }))
   else
     table.insert(rows, ui.box({ height = 16 }))
   end
 
-  -- Current lyric (bold, prominent)
+  -- Current lyric (dynamically scaled font)
+  local currentText = state.current or "..."
   table.insert(rows, ui.label({
-    text = state.current or "...",
-    fontSize = 18, fontWeight = "bold",
+    text = currentText,
+    fontSize = fitFontSize(currentText, 18), fontWeight = "bold",
     color = "on_surface/0.95", textAlign = "center", wrap = true,
   }))
 
-  -- Next lyric (faded)
-  if (state.next or "") ~= "" then
+  -- Next lyric (dynamically scaled font)
+  local nextText = state.next or ""
+  if nextText ~= "" then
     table.insert(rows, ui.label({
-      text = state.next,
-      fontSize = 14, fontWeight = "medium",
+      text = nextText,
+      fontSize = fitFontSize(nextText, 14), fontWeight = "medium",
       color = "on_surface/0.4", textAlign = "center", wrap = true,
     }))
   else
@@ -195,22 +203,19 @@ end
 --------------------------------------------------------------------------------
 
 function update()
-  noctalia.setUpdateInterval(100)  -- 10 FPS: smooth enough for lyrics sync
+  noctalia.setUpdateInterval(100)
 
   local now = os.clock()
   local delta = lastClock > 0 and now - lastClock or 0
   lastClock = now
 
-  -- Read state (daemon writes at ~3 Hz, so 10 Hz reads is plenty)
   lastState = readState() or lastState
 
-  -- Determine target height
   local targetHeight = MIN_HEIGHT
   if lastState and lastState.status == "Playing" then
     targetHeight = estimateContentHeight(lastState)
   end
 
-  -- Height grows INSTANTLY (prevents any spill frames), shrinks smoothly
   if targetHeight > currentHeight then
     currentHeight = targetHeight
   else
