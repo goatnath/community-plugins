@@ -1,11 +1,13 @@
 --!nonstrict
--- Spotify Lyrics Panel – 3-line synced lyrics view.
+-- Spotify Lyrics Panel – 3-line synced lyrics view with album art.
 --
--- Reads state from ~/.cache/noctalia/lyrics/current.json (written by the daemon)
--- and renders prev / current / next lyric lines.
+-- Reads state from noctalia.state (published by bar.luau) and renders
+-- album art + prev / current / next lyric lines reactively via
+-- noctalia.state.watch().
 --
--- Long lyrics are dynamically scaled to a smaller font size so they take up
--- less vertical space and never overflow the panel.
+-- NOTE: Panels do NOT get update() called on a timer. Only bar widgets,
+-- desktop widgets, and services receive update(). Panels must use
+-- noctalia.state.watch() or onFrameTick for live updates.
 
 --------------------------------------------------------------------------------
 -- Layout constants
@@ -13,21 +15,11 @@
 local PANEL_WIDTH   = 460
 local PANEL_PADDING = 16
 local INNER_WIDTH   = PANEL_WIDTH - PANEL_PADDING * 2  -- 428px usable
-local MIN_HEIGHT    = 160
-
---------------------------------------------------------------------------------
--- Runtime state
---------------------------------------------------------------------------------
-local currentHeight = MIN_HEIGHT
-local lastState     = nil
-local lastClock     = os.clock()
+local PANEL_HEIGHT  = 280  -- matches plugin.toml height exactly
+local ART_SIZE      = 80   -- album art thumbnail size
 
 --------------------------------------------------------------------------------
 -- Dynamic font sizing
---
--- Scale font size down for long lyrics to reduce wrapping.
--- Short text (<=40 chars) keeps the default size.
--- Every 15 chars beyond 40 reduces font by 2px, capped at a readable minimum.
 --------------------------------------------------------------------------------
 
 local function fitFontSize(text, defaultSize)
@@ -39,56 +31,17 @@ local function fitFontSize(text, defaultSize)
 end
 
 --------------------------------------------------------------------------------
--- Height estimation (backup safety for minHeight)
+-- Text truncation
 --------------------------------------------------------------------------------
 
-local function estimateLines(text, fontSize)
-  if not text or text == "" then return 0 end
+local function clampText(text, fontSize, maxLines)
+  if not text or text == "" then return text end
   local charsPerLine = math.max(1, math.floor(INNER_WIDTH / (fontSize * 0.60)))
-  return math.max(1, math.ceil(#text / charsPerLine))
-end
-
-local function estimateContentHeight(state)
-  local h = PANEL_PADDING * 2
-
-  if state.title and state.artist then
-    local titleSize = 12
-    h = h + 14 + 4 + estimateLines(state.title .. " • " .. state.artist, titleSize) * 18
-    h = h + 8 + 1 + 8
+  local maxChars = charsPerLine * maxLines
+  if #text > maxChars then
+    return string.sub(text, 1, maxChars - 1) .. "…"
   end
-
-  local prevSize = fitFontSize(state.prev, 14)
-  if (state.prev or "") ~= "" then
-    h = h + estimateLines(state.prev, prevSize) * math.ceil(prevSize * 1.4)
-  else
-    h = h + 16
-  end
-  h = h + 8
-
-  local currentSize = fitFontSize(state.current, 18)
-  h = h + estimateLines(state.current or "...", currentSize) * math.ceil(currentSize * 1.4)
-  h = h + 8
-
-  local nextSize = fitFontSize(state.next, 14)
-  if (state.next or "") ~= "" then
-    h = h + estimateLines(state.next, nextSize) * math.ceil(nextSize * 1.4)
-  else
-    h = h + 16
-  end
-
-  h = h + 24  -- safety buffer
-  return math.max(MIN_HEIGHT, h)
-end
-
---------------------------------------------------------------------------------
--- State I/O
---------------------------------------------------------------------------------
-
-local function readState()
-  local content = noctalia.readFile("/home/goatnath/.cache/noctalia/lyrics/current.json")
-  if not content then return nil end
-  local state, _ = noctalia.json.decode(content)
-  return state
+  return text
 end
 
 --------------------------------------------------------------------------------
@@ -98,7 +51,9 @@ end
 local function renderEmpty()
   panel.render(ui.column({
     flexGrow = 1, gap = 8, align = "stretch", justify = "center",
-    padding = PANEL_PADDING, minWidth = PANEL_WIDTH, minHeight = currentHeight,
+    padding = PANEL_PADDING,
+    minWidth = PANEL_WIDTH, height = PANEL_HEIGHT,
+    overflow = "hidden",
   }, {
     ui.row({ justify = "center" }, {
       ui.glyph({ name = "music", size = 28, color = "on_surface/0.2" }),
@@ -111,72 +66,115 @@ local function renderEmpty()
   }))
 end
 
-local function renderPaused(state)
-  panel.render(ui.column({
-    flexGrow = 1, gap = 6, align = "stretch", justify = "center",
-    padding = PANEL_PADDING, minWidth = PANEL_WIDTH, minHeight = currentHeight,
-  }, {
-    ui.row({ gap = 6, justify = "center", align = "center" }, {
-      ui.glyph({ name = "player-pause", size = 16, color = "on_surface/0.3" }),
-      ui.label({
-        text = (state.title or "Paused") .. " • " .. (state.artist or ""),
-        fontSize = 12, fontWeight = "medium",
-        color = "on_surface/0.4", textAlign = "center", wrap = true,
-      }),
+local function renderPaused(title, artist, current, artPath)
+  local headerChildren = {}
+
+  -- Album art (if available)
+  if artPath ~= "" then
+    table.insert(headerChildren, ui.image({
+      path = artPath,
+      width = 60, height = 60,
+      cornerRadius = 8,
+    }))
+  else
+    table.insert(headerChildren, ui.glyph({ name = "player-pause", size = 22, color = "on_surface/0.3" }))
+  end
+
+  -- Title + artist beside the art
+  table.insert(headerChildren, ui.column({ gap = 2, flexGrow = 1, flexShrink = 1 }, {
+    ui.label({
+      text = title or "Paused",
+      fontSize = 13, fontWeight = "bold",
+      color = "on_surface/0.5", wrap = true, maxLines = 1,
     }),
     ui.label({
-      text = state.current or "Paused",
+      text = artist or "",
+      fontSize = 11, fontWeight = "medium",
+      color = "on_surface/0.35", wrap = true, maxLines = 1,
+    }),
+  }))
+
+  panel.render(ui.column({
+    flexGrow = 1, gap = 8, align = "stretch", justify = "center",
+    padding = PANEL_PADDING,
+    minWidth = PANEL_WIDTH, height = PANEL_HEIGHT,
+    overflow = "hidden",
+  }, {
+    ui.row({ gap = 12, align = "center", justify = "center" }, headerChildren),
+    ui.label({
+      text = current or "Paused",
       fontSize = 18, fontWeight = "bold",
       color = "on_surface/0.6", textAlign = "center", wrap = true,
     }),
   }))
 end
 
-local function renderPlaying(state)
+local function renderPlaying(title, artist, prev, current, nextLine, artPath)
   local rows = {}
 
-  -- Track header
-  if state.title and state.artist then
-    table.insert(rows, ui.column({ gap = 4, align = "stretch" }, {
-      ui.row({ justify = "center" }, {
-        ui.glyph({ name = "music", size = 14, color = "primary/0.7" }),
+  -- ── Track header: album art + song info ──
+  if title ~= "" and artist ~= "" then
+    local headerChildren = {}
+
+    -- Album art
+    if artPath ~= "" then
+      table.insert(headerChildren, ui.image({
+        path = artPath,
+        width = ART_SIZE, height = ART_SIZE,
+        cornerRadius = 8,
+      }))
+    end
+
+    -- Title + artist stacked vertically, beside the art
+    table.insert(headerChildren, ui.column({ gap = 2, flexGrow = 1, flexShrink = 1 }, {
+      ui.label({
+        text = title,
+        fontSize = 13, fontWeight = "bold",
+        color = "on_surface/0.9", wrap = true, maxLines = 2,
       }),
       ui.label({
-        text = state.title .. " • " .. state.artist,
-        fontSize = 12, fontWeight = "medium",
-        color = "primary/0.7", textAlign = "center", wrap = true,
+        text = artist,
+        fontSize = 11, fontWeight = "medium",
+        color = "primary/0.7", wrap = true, maxLines = 1,
       }),
     }))
+
+    table.insert(rows, ui.row({ gap = 12, align = "center" }, headerChildren))
     table.insert(rows, ui.box({ height = 1, fill = "on_surface/0.06" }))
   end
 
-  -- Previous lyric (dynamically scaled font)
-  local prevText = state.prev or ""
-  if prevText ~= "" then
+  -- ── Previous lyric ──
+  if prev ~= "" then
+    local prevSize = fitFontSize(prev, 14)
     table.insert(rows, ui.label({
-      text = prevText,
-      fontSize = fitFontSize(prevText, 14), fontWeight = "medium",
+      text = clampText(prev, prevSize, 2),
+      fontSize = prevSize, fontWeight = "medium",
       color = "on_surface/0.4", textAlign = "center", wrap = true,
+      maxLines = 2,
     }))
   else
     table.insert(rows, ui.box({ height = 16 }))
   end
 
-  -- Current lyric (dynamically scaled font)
-  local currentText = state.current or "..."
+  -- ── Current lyric ──
+  local currentText = current
+  if currentText == "" then currentText = "..." end
+  local currentSize = fitFontSize(currentText, 18)
   table.insert(rows, ui.label({
-    text = currentText,
-    fontSize = fitFontSize(currentText, 18), fontWeight = "bold",
+    text = clampText(currentText, currentSize, 3),
+    fontSize = currentSize, fontWeight = "bold",
     color = "on_surface/0.95", textAlign = "center", wrap = true,
+    maxLines = 3,
   }))
 
-  -- Next lyric (dynamically scaled font)
-  local nextText = state.next or ""
-  if nextText ~= "" then
+  -- ── Next lyric ──
+  if nextLine ~= "" then
+    local nextSize = fitFontSize(nextLine, 14)
     table.insert(rows, ui.label({
-      text = nextText,
-      fontSize = fitFontSize(nextText, 14), fontWeight = "medium",
+      text = clampText(nextLine, nextSize, 2),
+      fontSize = nextSize, fontWeight = "medium",
       color = "on_surface/0.4", textAlign = "center", wrap = true,
+      maxLines = 2,
     }))
   else
     table.insert(rows, ui.box({ height = 16 }))
@@ -184,43 +182,42 @@ local function renderPlaying(state)
 
   panel.render(ui.column({
     flexGrow = 1, gap = 8, align = "stretch", justify = "center",
-    padding = PANEL_PADDING, minWidth = PANEL_WIDTH, minHeight = currentHeight,
+    padding = PANEL_PADDING,
+    minWidth = PANEL_WIDTH, height = PANEL_HEIGHT,
+    overflow = "hidden",
   }, rows))
 end
 
-local function render(state)
-  if not state or state.status == "Stopped" or state.status == "" then
+--------------------------------------------------------------------------------
+-- Full re-render from current noctalia.state snapshot
+--------------------------------------------------------------------------------
+
+local function renderFromState()
+  local status   = noctalia.state.get("lyricsStatus")   or ""
+  local title    = noctalia.state.get("lyricsTitle")     or ""
+  local artist   = noctalia.state.get("lyricsArtist")    or ""
+  local prev     = noctalia.state.get("lyricsPrev")      or ""
+  local current  = noctalia.state.get("lyricsCurrent")   or ""
+  local nextLine = noctalia.state.get("lyricsNext")      or ""
+  local artPath  = noctalia.state.get("lyricsArtPath")   or ""
+
+  if status == "" or status == "Stopped" then
     renderEmpty()
-  elseif state.status == "Paused" then
-    renderPaused(state)
+  elseif status == "Paused" then
+    renderPaused(title, artist, current, artPath)
   else
-    renderPlaying(state)
+    renderPlaying(title, artist, prev, current, nextLine, artPath)
   end
 end
 
 --------------------------------------------------------------------------------
--- Update loop
+-- Lifecycle
 --------------------------------------------------------------------------------
 
-function update()
-  noctalia.setUpdateInterval(100)
+function onOpen()
+  renderFromState()
 
-  local now = os.clock()
-  local delta = lastClock > 0 and now - lastClock or 0
-  lastClock = now
-
-  lastState = readState() or lastState
-
-  local targetHeight = MIN_HEIGHT
-  if lastState and lastState.status == "Playing" then
-    targetHeight = estimateContentHeight(lastState)
-  end
-
-  if targetHeight > currentHeight then
-    currentHeight = targetHeight
-  else
-    currentHeight = currentHeight + (targetHeight - currentHeight) * math.min(1, delta * 4)
-  end
-
-  render(lastState)
+  noctalia.state.watch("lyricsTick", function(_tick)
+    renderFromState()
+  end)
 end

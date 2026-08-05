@@ -1,8 +1,10 @@
 import os
 import time
 import json
+import hashlib
 import subprocess
 import threading
+import urllib.request
 import syncedlyrics
 from pathlib import Path
 
@@ -11,10 +13,15 @@ CACHE_DIR = Path.home() / ".cache" / "noctalia" / "lyrics"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CURRENT_STATE_FILE = CACHE_DIR / "current.json"
 
+ART_CACHE_DIR = CACHE_DIR / "art"
+ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 class SpotifyLyricsDaemon:
     def __init__(self):
         self.lyrics_cache = {}  # song_key -> list of lines
         self.fetching_keys = set()  # Tracks keys currently fetching in the background
+        self.art_cache = {}     # art_url -> local file path
+        self.art_fetching = set()  # URLs currently being downloaded
 
     def clean_filename(self, name):
         return "".join(c for c in name if c.isalnum() or c in (" ", "_", "-")).strip()
@@ -95,6 +102,55 @@ class SpotifyLyricsDaemon:
             print(f"[Daemon] Error reading LRC file: {e}")
         return []
 
+    def get_album_art_path(self, art_url):
+        """Download album art from URL and return local cached file path."""
+        if not art_url or art_url == "":
+            return ""
+        
+        # Check in-memory cache
+        if art_url in self.art_cache:
+            path = self.art_cache[art_url]
+            if os.path.exists(path):
+                return path
+        
+        # Derive a stable filename from the URL hash
+        url_hash = hashlib.md5(art_url.encode()).hexdigest()
+        ext = ".jpg"  # Spotify art is always JPEG
+        local_path = str(ART_CACHE_DIR / f"{url_hash}{ext}")
+        
+        # If already downloaded on disk, cache and return
+        if os.path.exists(local_path):
+            self.art_cache[art_url] = local_path
+            return local_path
+        
+        # Download in background to avoid blocking the main loop
+        if art_url not in self.art_fetching:
+            self.art_fetching.add(art_url)
+            threading.Thread(
+                target=self._download_art,
+                args=(art_url, local_path),
+                daemon=True
+            ).start()
+        
+        return ""  # Not yet available
+    
+    def _download_art(self, url, local_path):
+        try:
+            tmp_path = local_path + ".tmp"
+            urllib.request.urlretrieve(url, tmp_path)
+            os.replace(tmp_path, local_path)
+            self.art_cache[url] = local_path
+            print(f"[Daemon] Downloaded album art: {url[:60]}...")
+        except Exception as e:
+            print(f"[Daemon] Error downloading album art: {e}")
+            # Clean up partial download
+            try:
+                os.remove(local_path + ".tmp")
+            except OSError:
+                pass
+        finally:
+            self.art_fetching.discard(url)
+
     def get_player_status(self):
         try:
             # Query active players
@@ -108,12 +164,13 @@ class SpotifyLyricsDaemon:
             # Query all metadata in ONE execution using custom delimiters to eliminate subprocess latency
             output = subprocess.check_output([
                 "playerctl", "-p", player_name, "metadata", 
-                "--format", "{{status}}|||{{position}}|||{{title}}|||{{artist}}"
+                "--format", "{{status}}|||{{position}}|||{{title}}|||{{artist}}|||{{mpris:artUrl}}"
             ], stderr=subprocess.DEVNULL).decode("utf-8").strip()
             
             parts = output.split("|||")
             if len(parts) >= 4:
                 status, pos_us, title, artist = parts[0], parts[1], parts[2], parts[3]
+                art_url = parts[4] if len(parts) >= 5 else ""
                 
                 # Position is in microseconds (us), convert to milliseconds (ms)
                 position_ms = int(int(pos_us) / 1000)
@@ -122,7 +179,8 @@ class SpotifyLyricsDaemon:
                     "status": status,
                     "position_ms": position_ms,
                     "title": title,
-                    "artist": artist
+                    "artist": artist,
+                    "art_url": art_url
                 }
         except Exception:
             pass
@@ -166,6 +224,9 @@ class SpotifyLyricsDaemon:
             next_line = lyrics_lines[active_idx + 1]["text"] if active_idx >= 0 and active_idx + 1 < len(lyrics_lines) else ""
             next_next = lyrics_lines[active_idx + 2]["text"] if active_idx >= 0 and active_idx + 2 < len(lyrics_lines) else ""
             
+            # Resolve album art to a local file path
+            art_path = self.get_album_art_path(player.get("art_url", ""))
+            
             state = {
                 "status": player["status"],
                 "title": title,
@@ -174,7 +235,8 @@ class SpotifyLyricsDaemon:
                 "prev": prev,
                 "current": current,
                 "next": next_line,
-                "next_next": next_next
+                "next_next": next_next,
+                "art_path": art_path
             }
             
             # Save state
