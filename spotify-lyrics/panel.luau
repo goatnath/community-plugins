@@ -61,7 +61,7 @@ end
 
 local function render(state)
   if not state or state.status == "Stopped" or state.status == "" then
-    panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
+    panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
       ui.row({ justify = "center" }, { ui.glyph({ name = "music", size = 28, color = "on_surface/0.2" }) }),
       ui.label({ text = "No music playing", fontSize = 14, fontWeight = "medium", color = "on_surface/0.25", textAlign = "center" }),
     }))
@@ -69,7 +69,7 @@ local function render(state)
   end
 
   if state.status == "Paused" then
-    panel.render(ui.column({ flexGrow = 1, gap = 6, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
+    panel.render(ui.column({ flexGrow = 1, gap = 6, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
       ui.row({ gap = 6, justify = "center", align = "center" }, {
         ui.glyph({ name = "player-pause", size = 16, color = "on_surface/0.3" }),
         ui.label({
@@ -147,7 +147,7 @@ local function render(state)
     table.insert(rows, ui.box({ height = 16 }))
   end
 
-  panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = currentPanelWidth, minHeight = currentPanelHeight }, rows))
+  panel.render(ui.column({ flexGrow = 1, gap = 8, align = "stretch", justify = "center", padding = 16, minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, rows))
 end
 
 local lastState = nil
@@ -167,23 +167,10 @@ function update()
   end
   
   local state = lastState
-  local targetWidth = BASE_WIDTH
   local targetHeight = BASE_HEIGHT
   
   if state and state.status == "Playing" then
-    local titleText = (state.title or "") .. " • " .. (state.artist or "")
-    targetWidth = math.max(targetWidth, getLineWidth(titleText, 12))
-    targetWidth = math.max(targetWidth, getLineWidth(state.prev or "", 18))
-    targetWidth = math.max(targetWidth, getLineWidth(state.current or "...", 18))
-    targetWidth = math.max(targetWidth, getLineWidth(state.next or "", 18))
-    targetWidth = math.max(targetWidth, getLineWidth(state.next_next or "", 18))
-    targetWidth = targetWidth + 48 
-
-    -- Limit width to a reasonable physical bound (like 800px).
-    -- If text exceeds this, it will wrap, and targetHeight will accurately encapsulate it!
-    targetWidth = math.min(targetWidth, 800)
-    
-    local innerW = targetWidth - 32
+    local innerW = BASE_WIDTH - 32
     targetHeight = 32 + 24 -- padding + gaps
     if state.title then targetHeight = targetHeight + 18 + 1 end
     
@@ -194,8 +181,6 @@ function update()
     -- Extra safety padding at the bottom to guarantee no clipping!
     targetHeight = targetHeight + 16
   end
-  
-  currentPanelWidth = currentPanelWidth + (targetWidth - currentPanelWidth) * math.min(1, delta * 6)
   
   -- Snap height up instantly to prevent spilling during expansion, but shrink smoothly
   if targetHeight > currentPanelHeight then

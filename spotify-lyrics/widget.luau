@@ -61,7 +61,7 @@ end
 
 local function render(lyricsState)
   if not lyricsState or lyricsState.status == "Stopped" or lyricsState.status == "" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
+    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
       ui.glyph({ name = "music", size = 28, color = "on_surface/0.3" }),
       ui.label({
         text = "No music playing",
@@ -74,7 +74,7 @@ local function render(lyricsState)
   end
 
   if lyricsState.status == "Paused" then
-    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, {
+    desktopWidget.render(ui.column({ gap = 8, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, {
       ui.glyph({ name = "player-pause", size = 22, color = "on_surface/0.4" }),
       ui.label({
         text = lyricsState.current or "Paused",
@@ -142,7 +142,7 @@ local function render(lyricsState)
     table.insert(rows, ui.box({ height = 18 })) 
   end
 
-  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = currentPanelWidth, minHeight = currentPanelHeight }, rows))
+  desktopWidget.render(ui.column({ gap = 10, align = "center", minWidth = BASE_WIDTH, minHeight = currentPanelHeight }, rows))
 end
 
 local lastState = nil
@@ -162,23 +162,10 @@ function update()
   end
   
   local state = lastState
-  local targetWidth = BASE_WIDTH
   local targetHeight = BASE_HEIGHT
   
   if state and state.status == "Playing" then
-    local titleText = (state.title or "") .. " — " .. (state.artist or "")
-    targetWidth = math.max(targetWidth, getLineWidth(titleText, 11) + 18)
-    targetWidth = math.max(targetWidth, getLineWidth(state.prev or "", 26))
-    targetWidth = math.max(targetWidth, getLineWidth(state.current or "...", 26))
-    targetWidth = math.max(targetWidth, getLineWidth(state.next or "", 26))
-    targetWidth = math.max(targetWidth, getLineWidth(state.next_next or "", 26))
-    targetWidth = targetWidth + 16
-    
-    -- Limit width to a reasonable physical bound (like 1000px).
-    -- If text exceeds this, it will wrap, and targetHeight will accurately encapsulate it!
-    targetWidth = math.min(targetWidth, 1000)
-    
-    local innerW = targetWidth - 20
+    local innerW = BASE_WIDTH - 20
     targetHeight = 20 + 20 
     if state.title then targetHeight = targetHeight + 16 + 1 end
     
@@ -189,8 +176,6 @@ function update()
     -- Extra safety padding at the bottom to guarantee no clipping!
     targetHeight = targetHeight + 16
   end
-  
-  currentPanelWidth = currentPanelWidth + (targetWidth - currentPanelWidth) * math.min(1, delta * 6)
   
   -- Snap height up instantly to prevent spilling during expansion, but shrink smoothly
   if targetHeight > currentPanelHeight then
