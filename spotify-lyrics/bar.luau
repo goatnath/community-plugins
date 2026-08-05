@@ -3,7 +3,7 @@
 -- Auto-hides when no music is playing. Click to toggle the lyrics panel.
 
 local function readState()
-  local content = noctalia.readFile("~/.cache/noctalia/lyrics/current.json")
+  local content = noctalia.readFile("/home/goatnath/.cache/noctalia/lyrics/current.json")
   if not content then return nil end
   local state, _ = noctalia.json.decode(content)
   return state
@@ -32,5 +32,5 @@ function update()
 end
 
 function onClick()
-  noctalia.togglePanel("goatnath/spotify-lyrics:lyrics-panel")
+  noctalia.togglePanel("noctalia/spotify-lyrics:lyrics-panel")
 end
