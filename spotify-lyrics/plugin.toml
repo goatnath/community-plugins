@@ -1,10 +1,10 @@
-id = "noctalia/spotify-lyrics"
+id = "goatnath/spotify-lyrics"
 name = "Spotify Lyrics"
 version = "1.2.0"
 plugin_api = 3
 author = "goatnath"
 license = "MIT"
-dependencies = []
+dependencies = ["playerctl", "python3", "syncedlyrics"]
 tags = ["music"]
 icon = "music"
 description = "Time-synced lyrics panel linked to the media widget."
@@ -21,3 +21,7 @@ id = "lyrics-panel"
 entry = "panel.luau"
 width = 460
 height = 280
+
+[[desktop_widget]]
+id = "lyrics-desktop"
+entry = "widget.luau"

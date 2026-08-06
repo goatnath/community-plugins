@@ -6,8 +6,10 @@
 -- all lyrics fields into noctalia.state so the panel can reactively consume
 -- them without polling the filesystem itself.
 
+local STATE_PATH = noctalia.expandPath("~/.cache/noctalia/lyrics/current.json")
+
 local function readState()
-  local content = noctalia.readFile("/home/goatnath/.cache/noctalia/lyrics/current.json")
+  local content = noctalia.readFile(STATE_PATH)
   if not content then return nil end
   local state, _ = noctalia.json.decode(content)
   return state
@@ -55,5 +57,5 @@ function update()
 end
 
 function onClick()
-  noctalia.togglePanel("noctalia/spotify-lyrics:lyrics-panel")
+  noctalia.togglePanel("goatnath/spotify-lyrics:lyrics-panel")
 end
